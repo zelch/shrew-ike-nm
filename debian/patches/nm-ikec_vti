@@ -1,0 +1,139 @@
+Description: Add support for using vti0.
+ The Virtual Network Interface setup in the Linux kernel allows us to
+ separate the VPN return traffic on it's own interface.
+ .
+ This is what we actually need for current instances of network-manager.
+ .
+ Note, the approach is very evil, and assumes that vti0 is actually free.
+ .
+ As part of this, don't even bother sending route data for a full tunnel.
+Author: Zephaniah E. Loss-Cutler-Hull <zhull@jetpay.com>
+
+---
+The information above should follow the Patch Tagging Guidelines, please
+checkout http://dep.debian.net/deps/dep3/ to learn about the format. Here
+are templates for supplementary fields that you might want to add:
+
+Origin: JetPay
+Forwarded: no
+Last-Update: 2017-04-04
+
+--- ike-2.2.1+dfsg.orig/source/nm-ikec/ikec.cpp
++++ ike-2.2.1+dfsg/source/nm-ikec/ikec.cpp
+@@ -976,7 +976,7 @@ long _IKEC_NM::func( void * )
+ 		return -1;
+ 	}
+ 
+-	if( !strcmp( "virtual", text ) )
++	if (!strcmp( "virtual", text) || !strcmp ("none", text) || !strcmp ("vti", text))
+ 	{
+ 		xconf.iface[0] = '\0';
+ 		strncpy (xconf.iface, text, sizeof (xconf.iface));
+@@ -986,6 +986,11 @@ long _IKEC_NM::func( void * )
+ 
+ 		peer.plcy_mode = POLICY_MODE_CONFIG;
+ 
++		// For either 'none' or 'vti', ike shouldn't setup the network interface at all.
++		if (!strcmp ("none", text) || !strcmp ("vti", text)) {
++			xconf.flags |= IP_CONF_OPTS_CLIENT_FULL;
++		}
++
+ 		// ip address and netmask
+ 
+ 		if ((text = nm_setting_vpn_get_data_item (s_vpn, "client-addr-auto")))
+@@ -1018,15 +1023,6 @@ long _IKEC_NM::func( void * )
+ 		xconf.vmtu = 1500;
+ 		if ((text = nm_setting_vpn_get_data_item (s_vpn, "network-mtu-size")) && (numb = atoi(text)))
+ 			xconf.vmtu = numb;
+-	} else if (!strcmp ("none", text)) {
+-		xconf.iface[0] = '\0';
+-		strncpy (xconf.iface, text, sizeof (xconf.iface));
+-
+-		xconf.opts |= ( IPSEC_OPTS_ADDR | IPSEC_OPTS_MASK );
+-		xconf.rqst |= ( IPSEC_OPTS_ADDR | IPSEC_OPTS_MASK );
+-		xconf.flags |= IP_CONF_OPTS_CLIENT_FULL;
+-
+-		peer.plcy_mode = POLICY_MODE_CONFIG;
+ 	}
+ 
+ 
+@@ -1249,6 +1245,7 @@ long _IKEC_NM::func( void * )
+ 
+ 	//xconf.flags = IP_CONF_OPTS_CLIENT | IP_CONF_OPTS_CLIENT_ROUTE | IP_CONF_OPTS_NO_TUN;
+ 	xconf.flags |= IP_CONF_OPTS_CLIENT | IP_CONF_OPTS_CLIENT_ROUTE;
++	log( STATUS_INFO, "Set interface flags: 0x%x.\n", xconf.flags );
+ 	msg.set_client( &xconf );
+ 	result = ikei.send_message( msg, &msgres );
+ 
+@@ -1678,6 +1675,7 @@ long _IKEC_NM::func( void * )
+ 
+ 				// XXX: FIXME: We need to have actual logic here.
+ 
++				log( STATUS_INFO, "Interface flags: 0x%x.\n", xconf.flags );
+ 				if (!(xconf.flags & IP_CONF_OPTS_CLIENT_FULL)) {
+ 					if (!strcmp(xconf.iface, "default")) {
+ 						val = str_to_gvalue ("eth0.0", FALSE);
+@@ -1688,6 +1686,32 @@ long _IKEC_NM::func( void * )
+ 						g_hash_table_insert (config, (void *) NM_VPN_PLUGIN_IP4_CONFIG_TUNDEV, val);
+ 					else
+ 						goto IKEI_MSGID_CLIENT_err;
++				} else if (!strcmp(xconf.iface, "vti")) {
++					char command_buf[1024] = { 0 };
++					char gw_addr_str[128] = { 0 };
++					char iface[16] = "vti0"; // We should actually try to find a free one, but, eh.
++					int ret = 0;
++
++					// This is seriously horrid, we need a better solution.  But for now, it works.
++
++					// Get the gateway address in string format, assumes IPv4.
++					inet_ntop (AF_INET, &peer.saddr.saddr4.sin_addr, gw_addr_str, sizeof (gw_addr_str));
++
++					// This is...  A really horrible way to do this.
++					snprintf (command_buf, sizeof (command_buf) - 1, "ip tunnel add %s mode vti local $(ip route get %s | grep src | sed 's/^.*src \\([0-9.]*\\).*$/\\1/g')", iface, gw_addr_str);
++					ret = system (command_buf);
++					log (STATUS_INFO, "Ran: '%s' (ret code: %d)", command_buf, ret);
++
++					// This is even worse, we must disable the xfrm policy on the vti device for things to work.
++					// Since the device doesn't even exist until the previous command, we can't just set a policy it /etc/sysctl.d.
++					snprintf (command_buf, sizeof (command_buf) - 1, "echo 1 > /proc/sys/net/ipv4/conf/%s/disable_policy", iface);
++					ret = system (command_buf);
++					log (STATUS_INFO, "Ran: '%s' (ret code: %d)", command_buf, ret);
++
++					// Tell NM that the vti interface is our 'tun' interface, it works.
++					val = str_to_gvalue (iface, FALSE);
++					g_hash_table_insert (config, (void *) NM_VPN_PLUGIN_IP4_CONFIG_TUNDEV, val);
++					log (STATUS_INFO, "Forcing TUNDEV %s.", iface);
+ 				}
+ 
+ 				val = uint_to_gvalue(xconf.addr.s_addr);
+@@ -1833,7 +1857,7 @@ IKEI_MSGID_CLIENT_err:
+ 					}
+ #endif
+ 
+-					if (routes->len > 0) {
++					if (!is_full && routes->len > 0) {
+ 						value = g_new0 (GValue, 1);
+ 						g_value_init (value, DBUS_TYPE_G_ARRAY_OF_ARRAY_OF_UINT);
+ 						g_value_take_boxed (value, routes);
+@@ -1843,7 +1867,7 @@ IKEI_MSGID_CLIENT_err:
+ 						routes = NULL;
+ 					}
+ 
+-					g_warning("is_full %d, routes->len %d", is_full, routes->len);
++					g_warning("is_full %d, routes->len %d", is_full, routes ? routes->len : 0);
+ 
+ 					nm_vpn_plugin_set_ip4_config (NM_VPN_PLUGIN (nm_plugin), config);
+ 					nm_vpn_plugin_set_state (NM_VPN_PLUGIN (nm_plugin), NM_VPN_SERVICE_STATE_STARTED);
+--- ike-2.2.1+dfsg.orig/source/nm-ikec/nm-ikec-props.ui
++++ ike-2.2.1+dfsg/source/nm-ikec/nm-ikec-props.ui
+@@ -33,6 +33,10 @@
+         <col id="1" translatable="yes">virtual</col>
+       </row>
+       <row>
++        <col id="0" translatable="yes">Virtual (VTI)</col>
++        <col id="1" translatable="yes">vti</col>
++      </row>
++      <row>
+         <col id="0" translatable="yes">None (main interface)</col>
+         <col id="1" translatable="yes">none</col>
+       </row>

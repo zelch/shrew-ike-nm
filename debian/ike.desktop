@@ -1,0 +1,14 @@
+[Desktop Entry]
+Name=Shrew Soft VPN Access Manager
+Name[en_CA]=Shrew Soft VPN Access Manager
+Name[de]=Shrew Soft VPN Zugangsverwaltung
+Comment=Application to manage remote site configurations
+Comment[en_CA]=Application to manage remote site configurations
+Comment[de]=Anwendung zum Verwalten der VPN-Konfigurationen
+Exec=/usr/bin/qikea
+Icon=ikea
+Terminal=false
+Type=Application
+Categories=Network
+# TRANSLATORS: Search terms to find this application. Do NOT translate or localize the semicolons! The list MUST also end with a semicolon!
+Keywords=vpn;remote;access;ras;company;network;ike;

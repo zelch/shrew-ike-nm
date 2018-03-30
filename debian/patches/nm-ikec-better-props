@@ -1,0 +1,1847 @@
+Description: Better NetworkManager preference support.
+ First, this fixes a long standing quick in nm-ikec-auth-dialog, where it
+ sometimes doesn't work for new connections.
+ .
+ Second, this rewrites a large chunk of the NetworkManager VPN preference
+ dialog support.
+ .
+ We have somewhat sane defaults for new connections, and we can finally do
+ stuff like import new certificates and keys.
+ .
+ With that said, you still can't tweak everything, or even close to everything.
+ .
+ On the other hand, if you add it to the Glade UI, sticking to the supported
+ field types and giving the fields the right names, everything should Just
+ Work.
+ .
+ ike (2.2.1+dfsg-4.JP.02) trusty; urgency=low
+ .
+   * Major work on the preferences dialogs.
+Author: Zephaniah E. Loss-Cutler-Hull <zhull@jetpay.com>
+
+---
+The information above should follow the Patch Tagging Guidelines, please
+checkout http://dep.debian.net/deps/dep3/ to learn about the format. Here
+are templates for supplementary fields that you might want to add:
+
+Origin: <vendor|upstream|other>, <url of original patch>
+Bug: <url in upstream bugtracker>
+Bug-Debian: https://bugs.debian.org/<bugnumber>
+Bug-Ubuntu: https://launchpad.net/bugs/<bugnumber>
+Forwarded: <no|not-needed|url proving that it has been forwarded>
+Reviewed-By: <name and email of someone who approved the patch>
+Last-Update: 2016-06-30>
+
+--- ike-2.2.1+dfsg.orig/source/nm-ikec/CMakeLists.txt
++++ ike-2.2.1+dfsg/source/nm-ikec/CMakeLists.txt
+@@ -31,12 +31,14 @@ add_executable(
+ 	nm-ikec
+ 	config.cpp
+ 	ikec.cpp
++	config-values.cpp
+ 	)
+ 
+ add_library(
+ 	nm-ikec-properties SHARED
+ 	nm-ikec-props.cpp
+ 	config.cpp
++	config-values.cpp
+ 	)
+ 
+ pkg_search_module ("GTK", 1, "gtk+-3.0")
+--- /dev/null
++++ ike-2.2.1+dfsg/source/nm-ikec/config-values.cpp
+@@ -0,0 +1,113 @@
++/*
++ * Copyright (c) 2007, 2016
++ *      Shrew Soft Inc.  All rights reserved.
++ *      JetPay, LLC.  All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Redistributions in any form must be accompanied by information on
++ *    how to obtain complete source code for the software and any
++ *    accompanying software that uses the software.  The source code
++ *    must either be included in the distribution or be available for no
++ *    more than the cost of distribution plus a nominal fee, and must be
++ *    freely redistributable under reasonable conditions.  For an
++ *    executable file, complete source code means the source code for all
++ *    modules it contains.  It does not include source code for modules or
++ *    files that typically accompany the major components of the operating
++ *    system on which the executable file runs.
++ *
++ * THIS SOFTWARE IS PROVIDED BY SHREW SOFT INC AND JETPAY LLC ``AS IS'' AND ANY
++ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
++ * WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, OR
++ * NON-INFRINGEMENT, ARE DISCLAIMED.  IN NO EVENT SHALL SHREW SOFT INC
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ *
++ * AUTHOR : Matthew Grooms
++ *          mgrooms@shrew.net
++ * AUTHOR : Zephaniah E. Loss-Cutler-Hull
++ *          zhull@jetpay.com
++ *
++ */
++
++#include "config-values.h"
++#include "ikec.h"
++
++ValidProperty valid_properties[] = {
++	{ NM_IKEC_KEY_NETWORK_HOST,			G_TYPE_STRING, 0, 0, true, 0, "" },
++	{ NM_IKEC_KEY_NETWORK_IKE_PORT,		G_TYPE_STRING, 0, 0, true, 0, "500" },
++	{ NM_IKEC_KEY_CLIENT_AUTO_MODE,		G_TYPE_STRING, 0, 0, false, 0, "pull" },
++	{ NM_IKEC_KEY_NETWORK_NATT_MODE,	G_TYPE_STRING, 0, 0, false, 0, "enable" },
++	{ NM_IKEC_KEY_NETWORK_NATT_PORT,	G_TYPE_STRING, 0, 0, false, 0, "4500" },
++	{ NM_IKEC_KEY_NETWORK_NATT_RATE,	G_TYPE_STRING, 0, 0, false, 0, "15" },
++	{ NM_IKEC_KEY_NETWORK_FRAG_MODE,	G_TYPE_STRING, 0, 0, false, 0, "disable" },
++	{ NM_IKEC_KEY_NETWORK_FRAG_SIZE,	G_TYPE_STRING, 0, 0, false, 0, "540" },
++	{ NM_IKEC_KEY_NETWORK_DPD_ENABLE,	G_TYPE_STRING, 0, 0, false, 0, "1" },
++	{ NM_IKEC_KEY_NETWORK_NOTIFY_ENABLE,G_TYPE_STRING, 0, 0, false, 0, "1" },
++	{ NM_IKEC_KEY_CLIENT_BANNER_ENABLE,	G_TYPE_STRING, 0, 0, false, 0, "1" },
++	{ NM_IKEC_KEY_IDENT_CLIENT_TYPE,	G_TYPE_STRING, 0, 0, true, 0, "asn1dn" },
++	{ NM_IKEC_KEY_IDENT_SERVER_TYPE,	G_TYPE_STRING, 0, 0, true, 0, "asn1dn" },
++	{ NM_IKEC_KEY_PHASE1_EXCHANGE,		G_TYPE_STRING, 0, 0, true, 0, "main" },
++	{ NM_IKEC_KEY_PHASE1_CIPHER,		G_TYPE_STRING, 0, 0, true, 0, "aes" },
++	{ NM_IKEC_KEY_PHASE1_KEYLEN,		G_TYPE_STRING, 0, 0, true, 0, "256" },
++	{ NM_IKEC_KEY_PHASE1_HASH,			G_TYPE_STRING, 0, 0, true, 0, "sha1" },
++	{ NM_IKEC_KEY_PHASE1_DHGROUP,		G_TYPE_STRING, 0, 0, true, 0, "2" },
++	{ NM_IKEC_KEY_AUTH_METHOD,			G_TYPE_STRING, 0, 0, true, 0, "mutual-rsa-xauth" },
++	{ NM_IKEC_KEY_PHASE1_LIFE_SECS,		G_TYPE_STRING, 0, 0, false, 0, "32400" },
++	{ NM_IKEC_KEY_PHASE1_LIFE_KBYTES,	G_TYPE_STRING, 0, 0, false, 0, "0" },
++	{ NM_IKEC_KEY_PHASE2_TRANSFORM,		G_TYPE_STRING, 0, 0, true, 0, "aes" },
++	{ NM_IKEC_KEY_PHASE2_KEYLEN,		G_TYPE_STRING, 0, 0, true, 0, "256" },
++	{ NM_IKEC_KEY_PHASE2_HMAC,			G_TYPE_STRING, 0, 0, true, 0, "sha1" },
++	{ NM_IKEC_KEY_PHASE2_PFSGROUP,		G_TYPE_STRING, 0, 0, false, 0, "-1" },
++	{ NM_IKEC_KEY_PHASE2_LIFE_SECS,		G_TYPE_STRING, 0, 0, false, 0, "32400" },
++	{ NM_IKEC_KEY_PHASE2_LIFE_KBYTES,	G_TYPE_STRING, 0, 0, false, 0, "0" },
++	{ NM_IKEC_KEY_IPCOMP_TRANSFORM,		G_TYPE_STRING, 0, 0, true, 0, "disabled" },
++	{ NM_IKEC_KEY_CLIENT_IFACE,			G_TYPE_STRING, 0, 0, true, 0, "virtual" },
++	{ NM_IKEC_KEY_CLIENT_ADDR_AUTO,		G_TYPE_STRING, 0, 0, false, 0, "1" },
++	{ NM_IKEC_KEY_CLIENT_IP_ADDR,		G_TYPE_STRING, 0, 0, false, 0, "" },
++	{ NM_IKEC_KEY_CLIENT_IP_MASK,		G_TYPE_STRING, 0, 0, false, 0, "" },
++	{ NM_IKEC_KEY_NETWORK_MTU_SIZE,		G_TYPE_STRING, 0, 0, false, 0, "1500" },
++	{ NM_IKEC_KEY_NETWORK_UPDOWN_SCRIPT,G_TYPE_STRING, 0, 0, false, 0, "" },
++	{ NM_IKEC_KEY_NETWORK_UPDOWN_DNS,	G_TYPE_STRING, 0, 0, false, 0, "" },
++	{ NM_IKEC_KEY_CLIENT_WINS_ENABLE,	G_TYPE_STRING, 0, 0, false, 0, "" },
++	{ NM_IKEC_KEY_CLIENT_WINS_AUTO,		G_TYPE_STRING, 0, 0, false, 0, "" },
++	{ NM_IKEC_KEY_CLIENT_WINS_ADDR,		G_TYPE_STRING, 0, 0, false, 0, "" },
++	{ NM_IKEC_KEY_CLIENT_DNS_USED,		G_TYPE_STRING, 0, 0, false, 0, "1" },
++	{ NM_IKEC_KEY_CLIENT_DNS_AUTO,		G_TYPE_STRING, 0, 0, false, 0, "1" },
++	{ NM_IKEC_KEY_CLIENT_DNS_ADDR,		G_TYPE_STRING, 0, 0, false, 0, "" },
++	{ NM_IKEC_KEY_CLIENT_DNS_SUFFIX_AUTO,G_TYPE_STRING, 0, 0, false, 0, "1" },
++	{ NM_IKEC_KEY_CLIENT_DNS_SUFFIX,	G_TYPE_STRING, 0, 0, false, 0, "" },
++	{ NM_IKEC_KEY_POLICY_LEVEL,			G_TYPE_STRING, 0, 0, false, 0, "auto" },
++	{ NM_IKEC_KEY_POLICY_NAILED,		G_TYPE_STRING, 0, 0, false, 0, "0" },
++	{ NM_IKEC_KEY_POLICY_LIST_AUTO,		G_TYPE_STRING, 0, 0, false, 0, "1" },
++	{ NM_IKEC_KEY_VENDOR_CHKPT_ENABLE,	G_TYPE_STRING, 0, 0, false, 0, "1" },
++	{ NM_IKEC_KEY_IDENT_CLIENT_DATA,	G_TYPE_STRING, 0, 0, false, 0, "" },
++	{ NM_IKEC_KEY_IDENT_SERVER_DATA,	G_TYPE_STRING, 0, 0, false, 0, "" },
++	{ NM_IKEC_KEY_AUTH_SERVER_CERT,		G_TYPE_STRING, 0, 0, false, 0, "" },
++	{ NM_IKEC_KEY_AUTH_SERVER_CERT_NAME,G_TYPE_STRING, 0, 0, false, 0, "", NM_IKEC_KEY_AUTH_SERVER_CERT_DATA },
++	{ NM_IKEC_KEY_AUTH_SERVER_CERT_DATA,G_TYPE_STRING, 0, 0, false, 0, "" },
++	{ NM_IKEC_KEY_AUTH_CLIENT_CERT,		G_TYPE_STRING, 0, 0, false, 0, "" },
++	{ NM_IKEC_KEY_AUTH_CLIENT_CERT_NAME,G_TYPE_STRING, 0, 0, false, 0, "", NM_IKEC_KEY_AUTH_CLIENT_CERT_DATA },
++	{ NM_IKEC_KEY_AUTH_CLIENT_CERT_DATA,G_TYPE_STRING, 0, 0, false, 0, "" },
++	{ NM_IKEC_KEY_AUTH_CLIENT_KEY,		G_TYPE_STRING, 0, 0, false, 0, "" },
++	{ NM_IKEC_KEY_AUTH_CLIENT_KEY_NAME,	G_TYPE_STRING, 0, 0, false, 0, "", NM_IKEC_KEY_AUTH_CLIENT_KEY_DATA },
++	{ NM_IKEC_KEY_AUTH_CLIENT_KEY_DATA,	G_TYPE_STRING, 0, 0, false, 0, "" },
++	{ NM_IKEC_KEY_AUTH_MUTUAL_PSK,		G_TYPE_STRING, 0, 0, false, 0, "" },
++	{ NM_IKEC_KEY_CLIENT_SPLITDNS_LIST,	G_TYPE_STRING, 0, 0, false, 0, "" },
++	{ NM_IKEC_KEY_POLICY_LIST_EXCLUDE,	G_TYPE_STRING, 0, 0, false, 0, "" },
++	{ NM_IKEC_KEY_POLICY_LIST_INCLUDE,	G_TYPE_STRING, 0, 0, false, 0, "" },
++	{ "xauth-user-flags",				G_TYPE_INT, 0, 4, false, 0, "2"},
++	{ "xauth-passwd-flags",				G_TYPE_INT, 0, 4, false, 0, "2"},
++	{ NULL,                             G_TYPE_NONE, 0, 0, "" }
++};
+--- /dev/null
++++ ike-2.2.1+dfsg/source/nm-ikec/config-values.h
+@@ -0,0 +1,62 @@
++/*
++ * Copyright (c) 2007, 2016
++ *      Shrew Soft Inc.  All rights reserved.
++ *      JetPay, LLC.  All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Redistributions in any form must be accompanied by information on
++ *    how to obtain complete source code for the software and any
++ *    accompanying software that uses the software.  The source code
++ *    must either be included in the distribution or be available for no
++ *    more than the cost of distribution plus a nominal fee, and must be
++ *    freely redistributable under reasonable conditions.  For an
++ *    executable file, complete source code means the source code for all
++ *    modules it contains.  It does not include source code for modules or
++ *    files that typically accompany the major components of the operating
++ *    system on which the executable file runs.
++ *
++ * THIS SOFTWARE IS PROVIDED BY SHREW SOFT INC AND JETPAY LLC ``AS IS'' AND ANY
++ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
++ * WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, OR
++ * NON-INFRINGEMENT, ARE DISCLAIMED.  IN NO EVENT SHALL SHREW SOFT INC
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ *
++ * AUTHOR : Matthew Grooms
++ *          mgrooms@shrew.net
++ * AUTHOR : Zephaniah E. Loss-Cutler-Hull
++ *          zhull@jetpay.com
++ *
++ */
++
++#ifndef _CONFIG_GVALUES_H
++#define _CONFIG_GVALUES_H
++
++#include "gdk/gdk.h"
++
++typedef struct {
++    const char *name;
++    GType type;
++    gint int_min;
++    gint int_max;
++    bool required;
++    bool found;
++    const char *default_value;
++	const char *data_value; // For when this referrs to a file and we need the actual data.
++} ValidProperty;
++
++extern ValidProperty valid_properties[];
++
++#endif
+--- ike-2.2.1+dfsg.orig/source/nm-ikec/ikec.cpp
++++ ike-2.2.1+dfsg/source/nm-ikec/ikec.cpp
+@@ -1,4 +1,3 @@
+-
+ /*
+  * Copyright (c) 2007
+  *      Shrew Soft Inc.  All rights reserved.
+@@ -50,6 +49,7 @@
+ #include <NetworkManagerVPN.h>
+ 
+ #include "ikec.h"
++#include "config-values.h"
+ 
+ /* These are here because nm-dbus-glib-types.h isn't exported */
+ #define DBUS_TYPE_G_ARRAY_OF_UINT          (dbus_g_type_get_collection ("GArray", G_TYPE_UINT))
+@@ -59,89 +59,12 @@ G_DEFINE_TYPE (NMIKECPlugin, nm_ikec_plu
+ 
+ #define NM_IKEC_PLUGIN_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), NM_TYPE_IKEC_PLUGIN, NMIKECPluginPrivate))
+ 
+-typedef struct {
+-        const char *name;
+-        GType type;
+-        gint int_min;
+-        gint int_max;
+-		bool required;
+-		bool found;
+-} ValidProperty;
+-
+ typedef struct ValidateInfo {
+     ValidProperty *table;
+     GError **error;
+     gboolean have_items;
+ } ValidateInfo;
+ 
+-static ValidProperty valid_properties[] = {
+-		{ NM_IKEC_KEY_NETWORK_HOST,			G_TYPE_STRING, 0, 0, true, 0 },
+-		{ NM_IKEC_KEY_NETWORK_IKE_PORT,		G_TYPE_STRING, 0, 0, true, 0 },
+-		{ NM_IKEC_KEY_CLIENT_AUTO_MODE,		G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_NETWORK_NATT_MODE,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_NETWORK_NATT_PORT,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_NETWORK_NATT_RATE,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_NETWORK_FRAG_MODE,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_NETWORK_FRAG_SIZE,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_NETWORK_DPD_ENABLE,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_NETWORK_NOTIFY_ENABLE,G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_CLIENT_BANNER_ENABLE,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_IDENT_CLIENT_TYPE,	G_TYPE_STRING, 0, 0, true, 0 },
+-		{ NM_IKEC_KEY_IDENT_SERVER_TYPE,	G_TYPE_STRING, 0, 0, true, 0 },
+-		{ NM_IKEC_KEY_PHASE1_EXCHANGE,		G_TYPE_STRING, 0, 0, true, 0 },
+-		{ NM_IKEC_KEY_PHASE1_CIPHER,		G_TYPE_STRING, 0, 0, true, 0 },
+-		{ NM_IKEC_KEY_PHASE1_KEYLEN,		G_TYPE_STRING, 0, 0, true, 0 },
+-		{ NM_IKEC_KEY_PHASE1_HASH,			G_TYPE_STRING, 0, 0, true, 0 },
+-		{ NM_IKEC_KEY_PHASE1_DHGROUP,		G_TYPE_STRING, 0, 0, true, 0 },
+-		{ NM_IKEC_KEY_AUTH_METHOD,			G_TYPE_STRING, 0, 0, true, 0 },
+-		{ NM_IKEC_KEY_PHASE1_LIFE_SECS,		G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_PHASE1_LIFE_KBYTES,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_PHASE2_TRANSFORM,		G_TYPE_STRING, 0, 0, true, 0 },
+-		{ NM_IKEC_KEY_PHASE2_KEYLEN,		G_TYPE_STRING, 0, 0, true, 0 },
+-		{ NM_IKEC_KEY_PHASE2_HMAC,			G_TYPE_STRING, 0, 0, true, 0 },
+-		{ NM_IKEC_KEY_PHASE2_PFSGROUP,		G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_PHASE2_LIFE_SECS,		G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_PHASE2_LIFE_KBYTES,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_IPCOMP_TRANSFORM,		G_TYPE_STRING, 0, 0, true, 0 },
+-		{ NM_IKEC_KEY_CLIENT_IFACE,			G_TYPE_STRING, 0, 0, true, 0 },
+-		{ NM_IKEC_KEY_CLIENT_ADDR_AUTO,		G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_CLIENT_IP_ADDR,		G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_CLIENT_IP_MASK,		G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_NETWORK_MTU_SIZE,		G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_NETWORK_UPDOWN_SCRIPT,G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_NETWORK_UPDOWN_DNS,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_CLIENT_WINS_ENABLE,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_CLIENT_WINS_AUTO,		G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_CLIENT_WINS_ADDR,		G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_CLIENT_DNS_USED,		G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_CLIENT_DNS_AUTO,		G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_CLIENT_DNS_ADDR,		G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_CLIENT_DNS_SUFFIX_AUTO,G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_CLIENT_DNS_SUFFIX,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_POLICY_LEVEL,			G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_POLICY_NAILED,		G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_POLICY_LIST_AUTO,		G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_VENDOR_CHKPT_ENABLE,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_IDENT_CLIENT_DATA,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_IDENT_SERVER_DATA,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_AUTH_SERVER_CERT,		G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_AUTH_SERVER_CERT_NAME,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_AUTH_SERVER_CERT_DATA,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_AUTH_CLIENT_CERT,		G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_AUTH_CLIENT_CERT_NAME,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_AUTH_CLIENT_CERT_DATA,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_AUTH_CLIENT_KEY,		G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_AUTH_CLIENT_KEY_NAME,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_AUTH_CLIENT_KEY_DATA,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_AUTH_MUTUAL_PSK,		G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_CLIENT_SPLITDNS_LIST,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_POLICY_LIST_EXCLUDE,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ NM_IKEC_KEY_POLICY_LIST_INCLUDE,	G_TYPE_STRING, 0, 0, false, 0 },
+-		{ "xauth-user-flags",				G_TYPE_INT, 0, 4, false, 0},
+-		{ "xauth-passwd-flags",				G_TYPE_INT, 0, 4, false, 0},
+-        { NULL,                           G_TYPE_NONE, 0, 0 }
+-};
+-
+ static ValidProperty valid_secrets[] = {
+         { NM_IKEC_KEY_XAUTH_USER,	G_TYPE_STRING, 0, 0, true, 0 },
+         { NM_IKEC_KEY_XAUTH_PASSWD,	G_TYPE_STRING, 0, 0, true, 0 },
+@@ -689,12 +612,12 @@ long _IKEC_NM::func( void * )
+ 
+ 	// isakmp notify
+ 
+-	if ((text = nm_setting_vpn_get_data_item (s_vpn, "network-dpd-enable")) && (atoi(text)))
++	if ((text = nm_setting_vpn_get_data_item (s_vpn, "network-notify-enable")) && (atoi(text)))
+ 		peer.notify = true;
+ 
+ 	// request motd banner
+ 
+-	if ((text = nm_setting_vpn_get_data_item (s_vpn, "network-dpd-enable")) && (atoi(text)))
++	if ((text = nm_setting_vpn_get_data_item (s_vpn, "client-banner-enable")) && (atoi(text)))
+ 		xconf.rqst |= IPSEC_OPTS_BANNER;
+ 
+ 	//
+--- ike-2.2.1+dfsg.orig/source/nm-ikec/ikec.h
++++ ike-2.2.1+dfsg/source/nm-ikec/ikec.h
+@@ -250,5 +250,8 @@ typedef struct NMIKECPluginPrivate_s {
+ 	IKEC_NM *ikec;
+ } NMIKECPluginPrivate;
+ 
++#define DEBUG 0
++#define debug_print(fmt, ...) \
++    do { if (DEBUG) { fprintf (stderr, fmt, __VA_ARGS__); } } while (0)
+ 
+ #endif
+--- ike-2.2.1+dfsg.orig/source/nm-ikec/nm-ikec-auth-dialog
++++ ike-2.2.1+dfsg/source/nm-ikec/nm-ikec-auth-dialog
+@@ -3,6 +3,7 @@ use strict;
+ 
+ #my $log = new IO::File "/tmp/ikec-dialog.log", "a";
+ #die "Unable to open log! $!" if (!defined($log));
++#$log->autoflush(1);
+ #$log->print(asctime(localtime()) . "\n");
+ #$log->print(Dumper(\@ARGV));
+ 
+@@ -23,6 +24,7 @@ my (%secrets);
+ my (%data);
+ 
+ GetOptions("uuid|u=s" => \$opts{u}, "name|n=s" => \$opts{n}, "service|s=s" => \$opts{s}, "interactive|i" => \$opts{i}, "external-ui-mode" => \$opts{external});
++#getopts('u:n:s:ir', \%opts);
+ exit(1) if (!defined($opts{u}));
+ #$log->print(Dumper(\%opts));
+ 
+@@ -36,7 +38,10 @@ $settings->{'vpn'}->{'data'}->{'xauth-us
+ $settings->{'vpn'}->{'data'}->{'xauth-passwd-flags'} = 2;
+ delete $settings->{'ipv4'};
+ delete $settings->{'ipv6'};
+-$settings->{'connection'}->{'timestamp'} = dbus_int32($settings->{'connection'}->{'timestamp'});
++if (exists($settings->{'connection'}->{'timestamp'}) && defined($settings->{'connection'}->{'timestamp'})) {
++    $settings->{'connection'}->{'timestamp'} = dbus_int32($settings->{'connection'}->{'timestamp'});
++}
++#print Dumper($settings);
+ $con_settings->Update($settings);
+ 
+ while (<>) {
+--- ike-2.2.1+dfsg.orig/source/nm-ikec/nm-ikec-props.cpp
++++ ike-2.2.1+dfsg/source/nm-ikec/nm-ikec-props.cpp
+@@ -35,6 +35,8 @@
+ #include <gtk/gtk.h>
+ #include "nm-ikec-props.h"
+ #include "ikec.h"
++#include "config-values.h"
++#include "base64.h"
+ 
+ #define NM_VPN_API_SUBJECT_TO_CHANGE
+ #define GLADEDIR	"/usr/share/gnome-vpn-properties/ikec/"
+@@ -82,7 +84,6 @@ G_DEFINE_TYPE_EXTENDED (IkecPluginUiWidg
+ typedef struct {
+ 	GtkBuilder *builder;
+ 	GtkWidget *widget;
+-	GtkSizeGroup *group;
+ 	gint orig_dpd_timeout;
+ } IkecPluginUiWidgetPrivate;
+ 
+@@ -133,11 +134,11 @@ check_validity (IkecPluginUiWidget *self
+ 	GtkWidget *widget;
+ 	char *str;
+ 
+-	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "gateway_entry"));
++	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "network-host"));
+ 	str = (char *) gtk_entry_get_text (GTK_ENTRY (widget));
+-	fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++	debug_print ("%s %d (%s)\n", __FILE__, __LINE__, __func__);
+ 	if (!str || !strlen (str) || strstr (str, " ") || strstr (str, "\t")) {
+-		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++		debug_print ("%s %d (%s)\n", __FILE__, __LINE__, __func__);
+ 		g_set_error (error,
+ 		             IKEC_PLUGIN_UI_ERROR,
+ 		             IKEC_PLUGIN_UI_ERROR_INVALID_PROPERTY,
+@@ -155,47 +156,92 @@ stuff_changed_cb (GtkWidget *widget, gpo
+ }
+ 
+ static gboolean
++set_widget_value (IkecPluginUiWidget *self, GtkWidget *widget, const char *name, const char *value, gboolean signals)
++{
++	if (!self || !widget || !GTK_IS_WIDGET(widget) || !name || !value || !strlen (value)) {
++		return false;
++	}
++	if (GTK_IS_ENTRY (widget)) {
++		debug_print ("%s %d (%s): Got VPN setting for %s: '%s'\n", __FILE__, __LINE__, __func__, name, value);
++		gtk_entry_set_text (GTK_ENTRY (widget), value);
++		if (signals) {
++			g_signal_connect (G_OBJECT (widget), "changed", G_CALLBACK (stuff_changed_cb), self);
++		}
++	} else if (GTK_IS_COMBO_BOX (widget)) {
++		debug_print ("%s %d (%s): Widget is combobox for %s, set to '%s'.\n", __FILE__, __LINE__, __func__, name, value);
++		gtk_combo_box_set_active_id (GTK_COMBO_BOX (widget), value);
++		if (signals) {
++			g_signal_connect (G_OBJECT (widget), "changed", G_CALLBACK (stuff_changed_cb), self);
++		}
++	} else if (GTK_IS_FILE_CHOOSER_BUTTON (widget)) {
++		debug_print ("%s %d (%s): Widget is file chooser for %s, NOT set to '%s'.\n", __FILE__, __LINE__, __func__, name, value);
++		//gtk_file_chooser_set_current_name (GTK_FILE_CHOOSER (widget), value);
++		if (signals) {
++			g_signal_connect (G_OBJECT (widget), "file-set", G_CALLBACK (stuff_changed_cb), self);
++		}
++	} else if (GTK_IS_TOGGLE_BUTTON (widget)) {
++		if (value[0] == '1') {
++			debug_print ("%s %d (%s): Widget is toggle button for %s, marked checked. (%s)\n", __FILE__, __LINE__, __func__, name, value);
++			gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (widget), true);
++		} else {
++			debug_print ("%s %d (%s): Widget is toggle button for %s, marked unchecked. (%s)\n", __FILE__, __LINE__, __func__, name, value);
++			gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (widget), false);
++		}
++		if (signals) {
++			g_signal_connect (G_OBJECT (widget), "toggled", G_CALLBACK (stuff_changed_cb), self);
++		}
++	} else if (GTK_IS_TEXT_VIEW (widget)) {
++		char decode_buf[strlen (value) + 1];
++		memset (decode_buf, 0, strlen (value) + 1);
++
++		GtkTextBuffer *buffer = gtk_text_view_get_buffer (GTK_TEXT_VIEW (widget));
++		if (b64_pton (value, (unsigned char *) decode_buf, strlen (value) + 1) > 0) {
++			debug_print ("%s %d (%s): Widget is text view for %s, set to '%s' (base64).\n", __FILE__, __LINE__, __func__, name, decode_buf);
++			gtk_text_buffer_set_text (buffer, decode_buf, -1);
++		} else {
++			debug_print ("%s %d (%s): Widget is text view for %s, set to '%s' (raw).\n", __FILE__, __LINE__, __func__, name, value);
++			gtk_text_buffer_set_text (buffer, value, -1);
++		}
++	} else {
++		debug_print ("%s %d (%s): Widget for %s is unknown type.\n", __FILE__, __LINE__, __func__, name);
++		return false;
++	}
++
++	return true;
++}
++
++static gboolean
+ init_plugin_ui (IkecPluginUiWidget *self, NMConnection *connection, GError **error)
+ {
+ 	IkecPluginUiWidgetPrivate *priv = IKEC_PLUGIN_UI_WIDGET_GET_PRIVATE (self);
+ 	NMSettingVPN *s_vpn;
+ 	GtkWidget *widget;
+-	GtkListStore *store;
+-	GtkTreeIter iter;
+ 	const char *value = NULL;
+-	int active = -1;
+-	const char *natt_mode = NULL;
+ 
+ 	s_vpn = (NMSettingVPN *) nm_connection_get_setting (connection, NM_TYPE_SETTING_VPN);
+-	g_warning ("(%d): self: %p, s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, connection: %p", __LINE__, self, s_vpn, NM_IS_SETTING_VPN (s_vpn), connection);
++	debug_print ("(%d): self: %p, s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, connection: %p", __LINE__, self, s_vpn, NM_IS_SETTING_VPN (s_vpn), connection);
+ 
+-	priv->group = gtk_size_group_new (GTK_SIZE_GROUP_HORIZONTAL);
+-
+-	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "gateway_entry"));
++	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "network-host"));
+ 	g_return_val_if_fail (widget != NULL, FALSE);
+-	gtk_size_group_add_widget (priv->group, GTK_WIDGET (widget));
+-	if (s_vpn) {
+-		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
+-		value = nm_setting_vpn_get_data_item (s_vpn, NM_IKEC_KEY_NETWORK_HOST);
+-		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
+-		if (value && strlen (value))
+-			gtk_entry_set_text (GTK_ENTRY (widget), value);
+-	}
+-	g_signal_connect (G_OBJECT (widget), "changed", G_CALLBACK (stuff_changed_cb), self);
+ 
+-	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "gateway_port"));
+-	g_return_val_if_fail (widget != NULL, FALSE);
+-	gtk_size_group_add_widget (priv->group, GTK_WIDGET (widget));
+-	if (s_vpn) {
+-		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
+-		value = nm_setting_vpn_get_data_item (s_vpn, NM_IKEC_KEY_NETWORK_IKE_PORT);
+-		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
+-		if (value && strlen (value))
+-			gtk_entry_set_text (GTK_ENTRY (widget), value);
++	for (int i = 0; valid_properties[i].name; i++) {
++		widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, valid_properties[i].name));
++		if (widget) {
++			if (s_vpn) {
++				value = nm_setting_vpn_get_data_item (s_vpn, valid_properties[i].name);
++			} else {
++				value = valid_properties[i].default_value;
++			}
++			if (!value || !strlen (value)) {
++				continue;
++			}
++			set_widget_value (self, widget, valid_properties[i].name, value, true);
++		} else {
++			debug_print ("%s %d (%s): No widget for %s.\n", __FILE__, __LINE__, __func__, valid_properties[i].name);
++		}
+ 	}
+-	g_signal_connect (G_OBJECT (widget), "changed", G_CALLBACK (stuff_changed_cb), self);
+-
+ 
++#if 0
+ 	active = -1;
+ 	store = gtk_list_store_new (2, G_TYPE_STRING, G_TYPE_STRING);
+ 	if (s_vpn)
+@@ -240,7 +286,7 @@ init_plugin_ui (IkecPluginUiWidget *self
+ 				gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (widget), TRUE);
+ 		}
+ 	}
+-	g_signal_connect (G_OBJECT (widget), "toggled", G_CALLBACK (stuff_changed_cb), self);
++#endif
+ 
+ 	return TRUE;
+ }
+@@ -251,6 +297,7 @@ get_widget (NMVpnPluginUiWidgetInterface
+ 	IkecPluginUiWidget *self = IKEC_PLUGIN_UI_WIDGET (iface);
+ 	IkecPluginUiWidgetPrivate *priv = IKEC_PLUGIN_UI_WIDGET_GET_PRIVATE (self);
+ 
++	debug_print ("%s %d (%s): %p, %p\n", __FILE__, __LINE__, __func__, G_OBJECT(priv->widget), gtk_widget_get_parent(priv->widget));
+ 	return G_OBJECT (priv->widget);
+ }
+ 
+@@ -263,16 +310,15 @@ update_connection (NMVpnPluginUiWidgetIn
+ 	IkecPluginUiWidgetPrivate *priv = IKEC_PLUGIN_UI_WIDGET_GET_PRIVATE (self);
+ 	NMSettingVPN *s_vpn;
+ 	GtkWidget *widget;
+-	char *str;
+-	GtkTreeModel *model;
+-	GtkTreeIter iter;
++	const char *str;
+ 	int new_setting = 0;
++	char data_buf[4096];
+ 
+ 	if (!check_validity (self, error))
+ 		return FALSE;
+ 
+ 	s_vpn = NM_SETTING_VPN (nm_connection_get_setting (connection, NM_TYPE_SETTING_VPN));
+-	g_warning ("(%d): self: %p, s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, connection: %p", __LINE__, self, s_vpn, NM_IS_SETTING_VPN (s_vpn), connection);
++	debug_print ("(%d): self: %p, s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, connection: %p", __LINE__, self, s_vpn, NM_IS_SETTING_VPN (s_vpn), connection);
+ 	if (!s_vpn || !NM_IS_SETTING_VPN(s_vpn)) {
+ 		s_vpn = NM_SETTING_VPN (nm_setting_vpn_new ());
+ 		g_warning ("(%d): s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, connection: %p", __LINE__, s_vpn, NM_IS_SETTING_VPN (s_vpn), connection);
+@@ -280,46 +326,78 @@ update_connection (NMVpnPluginUiWidgetIn
+ 	}
+ 	g_object_set (s_vpn, NM_SETTING_VPN_SERVICE_TYPE, NM_DBUS_SERVICE_IKEC, NULL);
+ 
+-	/* Gateway */
+-	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "gateway_entry"));
+-	str = (char *) gtk_entry_get_text (GTK_ENTRY (widget));
+-	if (str && strlen (str))
+-		nm_setting_vpn_add_data_item (s_vpn, NM_IKEC_KEY_NETWORK_HOST, str);
+-
+-	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "gateway_port"));
+-	str = (char *) gtk_entry_get_text (GTK_ENTRY (widget));
+-	if (str && strlen (str))
+-		nm_setting_vpn_add_data_item (s_vpn, NM_IKEC_KEY_NETWORK_IKE_PORT, str);
+-
+-	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "natt_combo"));
+-	model = gtk_combo_box_get_model (GTK_COMBO_BOX (widget));
+-	if (gtk_combo_box_get_active_iter (GTK_COMBO_BOX (widget), &iter)) {
+-		const char *mode = NULL;
+-
+-		gtk_tree_model_get (model, &iter, 1, &mode, -1);
+-		nm_setting_vpn_add_data_item (s_vpn, NM_IKEC_KEY_NETWORK_NATT_MODE, mode);
+-	} else
+-		nm_setting_vpn_add_data_item (s_vpn, NM_IKEC_KEY_NETWORK_NATT_MODE, NM_IKEC_NATT_MODE_ENABLE);
+-
+-	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "disable_dpd_checkbutton"));
+-	if (gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (widget))) {
+-		nm_setting_vpn_add_data_item (s_vpn, NM_IKEC_KEY_NETWORK_DPD_ENABLE, "0");
+-	} else {
+-		/* If DPD was disabled and now the user wishes to enable it, just
+-		 * don't pass the DPD_IDLE_TIMEOUT option to ikec and thus use the
+-		 * default DPD idle time.  Otherwise keep the original DPD idle timeout.
+-		 */
+-		if (priv->orig_dpd_timeout >= 10) {
+-			char *tmp = g_strdup_printf ("%d", priv->orig_dpd_timeout);
+-			nm_setting_vpn_add_data_item (s_vpn, NM_IKEC_KEY_NETWORK_DPD_ENABLE, tmp);
+-			g_free (tmp);
++	for (int i = 0; valid_properties[i].name; i++) {
++		widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, valid_properties[i].name));
++		str = NULL;
++		if (widget) {
++			if (GTK_IS_ENTRY (widget)) {
++				str = (char *) gtk_entry_get_text (GTK_ENTRY (widget));
++			} else if (GTK_IS_COMBO_BOX (widget)) {
++				str = (char *) gtk_combo_box_get_active_id (GTK_COMBO_BOX (widget));
++			} else if (GTK_IS_TOGGLE_BUTTON (widget)) {
++				if (gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (widget))) {
++					str = "1";
++				} else {
++					str = "0";
++				}
++			} else if (GTK_IS_FILE_CHOOSER_BUTTON (widget) && valid_properties[i].data_value) {
++				char *filename = gtk_file_chooser_get_filename (GTK_FILE_CHOOSER (widget));
++				if (filename) {
++					FILE *data_file = fopen (filename, "r");
++					if (data_file) {
++						size_t data_len;
++						memset (data_buf, 0, sizeof (data_buf));
++						data_len = fread (data_buf, 1, sizeof (data_buf) - 1, data_file) >= (sizeof (data_buf) - 1);
++						if (data_len >= (sizeof (data_buf) - 1)) {
++							debug_print ("%s %d (%s): Truncated data reading file '%s' for %s.\n", __FILE__, __LINE__, __func__, filename, valid_properties[i].name);
++						}
++						fclose (data_file);
++
++						debug_print ("%s %d (%s): Data read from file '%s' for %s: '%s'.\n", __FILE__, __LINE__, __func__, filename, valid_properties[i].name, data_buf);
++						set_widget_value (self, GTK_WIDGET (gtk_builder_get_object (priv->builder, valid_properties[i].data_value)), valid_properties[i].data_value, data_buf, false);
++					} else {
++						debug_print ("%s %d (%s): Unable to open file '%s' for %s.\n", __FILE__, __LINE__, __func__, filename, valid_properties[i].name);
++					}
++
++					// Unselect it so we don't reload the data every pass through.
++					gtk_file_chooser_unselect_file (GTK_FILE_CHOOSER (widget), gtk_file_chooser_get_file (GTK_FILE_CHOOSER (widget)));
++				}
++			} else if (GTK_IS_TEXT_VIEW (widget)) {
++				GtkTextBuffer *buffer = gtk_text_view_get_buffer (GTK_TEXT_VIEW (widget));
++				GtkTextIter start, end;
++				gtk_text_buffer_get_start_iter (buffer, &start);
++				gtk_text_buffer_get_end_iter (buffer, &end);
++				gtk_text_buffer_remove_all_tags (buffer, &start, &end);
++
++				str = gtk_text_buffer_get_text (buffer, &start, &end, true);
++
++				int len = b64_ntop ((unsigned char *) str, strlen (str), data_buf, sizeof (data_buf));
++				if (len > 0) {
++					str = data_buf;
++				}
++			} else {
++				debug_print ("%s %d (%s): Unknown type for %s.\n", __FILE__, __LINE__, __func__, valid_properties[i].name);
++			}
++
++			if (str) {
++				nm_setting_vpn_add_data_item (s_vpn, valid_properties[i].name, str);
++				debug_print ("%s %d (%s): Set VPN setting for %s: '%s'\n", __FILE__, __LINE__, __func__, valid_properties[i].name, str);
++			} else {
++				debug_print ("%s %d (%s): No VPN setting for %s.\n", __FILE__, __LINE__, __func__, valid_properties[i].name);
++			}
++		} else {
++			debug_print ("%s %d (%s): No widget for setting %s.\n", __FILE__, __LINE__, __func__, valid_properties[i].name);
+ 		}
+ 	}
+ 
+-	g_warning ("(%d): s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, connection: %p", __LINE__, s_vpn, NM_IS_SETTING_VPN (s_vpn), connection);
++	// Identify what secrets we will need to actually connect.
++	nm_setting_set_secret_flags (NM_SETTING (s_vpn), NM_IKEC_KEY_XAUTH_USER, NM_SETTING_SECRET_FLAG_NOT_SAVED, NULL);
++	nm_setting_set_secret_flags (NM_SETTING (s_vpn), NM_IKEC_KEY_XAUTH_PASSWD, NM_SETTING_SECRET_FLAG_NOT_SAVED, NULL);
++
++	debug_print ("(%d): s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, connection: %p", __LINE__, s_vpn, NM_IS_SETTING_VPN (s_vpn), connection);
+ 	if (new_setting) {
+ 		nm_connection_add_setting (connection, NM_SETTING (s_vpn));
+-		g_warning ("(%d): s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, connection: %p", __LINE__, s_vpn, NM_IS_SETTING_VPN (s_vpn), connection);
++		debug_print ("(%d): s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, connection: %p", __LINE__, s_vpn, NM_IS_SETTING_VPN (s_vpn), connection);
+ 	}
+ 	return TRUE;
+ }
+@@ -331,75 +409,67 @@ nm_vpn_plugin_ui_widget_interface_new (N
+ 	IkecPluginUiWidgetPrivate *priv;
+ 	char *ui_file;
+ 
+-	fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++	debug_print ("%s %d (%s)\n", __FILE__, __LINE__, __func__);
+ 	if (error)
+ 		g_return_val_if_fail (*error == NULL, NULL);
+ 
+-	fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++	debug_print ("%s %d (%s)\n", __FILE__, __LINE__, __func__);
+ 	object = NM_VPN_PLUGIN_UI_WIDGET_INTERFACE (g_object_new (IKEC_TYPE_PLUGIN_UI_WIDGET, NULL));
+-	fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++	debug_print ("%s %d (%s)\n", __FILE__, __LINE__, __func__);
+ 	if (!object) {
+ 		g_set_error (error, IKEC_PLUGIN_UI_ERROR, 0, "could not create ikec object");
+ 		return NULL;
+ 	}
+ 
+-	fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++	debug_print ("%s %d (%s)\n", __FILE__, __LINE__, __func__);
+ 	priv = IKEC_PLUGIN_UI_WIDGET_GET_PRIVATE (object);
+-	fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++	debug_print ("%s %d (%s)\n", __FILE__, __LINE__, __func__);
+ 
+ 	ui_file = g_strdup_printf ("%s/%s", GLADEDIR, "nm-ikec-props.ui");
+-	fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++	debug_print ("%s %d (%s)\n", __FILE__, __LINE__, __func__);
+ 	priv->builder = gtk_builder_new ();
+-	fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++	debug_print ("%s %d (%s)\n", __FILE__, __LINE__, __func__);
+ 	if (!gtk_builder_add_from_file (priv->builder, ui_file, error)) {
+-		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++		debug_print ("%s %d (%s)\n", __FILE__, __LINE__, __func__);
+ 		g_set_error (error, IKEC_PLUGIN_UI_ERROR, 0,
+ 		             "could not load required resources at %s", ui_file);
+ 		g_free (ui_file);
+ 		g_object_unref (object);
+ 		return NULL;
+ 	}
+-		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++		debug_print ("%s %d (%s)\n", __FILE__, __LINE__, __func__);
+ 	g_free (ui_file);
+-		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++		debug_print ("%s %d (%s)\n", __FILE__, __LINE__, __func__);
+ 
+ 	priv->widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "ikec-vbox"));
+-		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++	debug_print ("%s %d (%s): %p, %p\n", __FILE__, __LINE__, __func__, G_OBJECT(priv->widget), gtk_widget_get_parent(priv->widget));
++		debug_print ("%s %d (%s)\n", __FILE__, __LINE__, __func__);
+ 	if (!priv->widget) {
+-		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++		debug_print ("%s %d (%s)\n", __FILE__, __LINE__, __func__);
+ 		g_set_error (error, IKEC_PLUGIN_UI_ERROR, 0, "could not load UI widget");
+ 		g_object_unref (object);
+ 		return NULL;
+ 	}
+-		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++		debug_print ("%s %d (%s)\n", __FILE__, __LINE__, __func__);
+ 	g_object_ref_sink (priv->widget);
+-		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++		debug_print ("%s %d (%s)\n", __FILE__, __LINE__, __func__);
+ 
+ 	if (!init_plugin_ui (IKEC_PLUGIN_UI_WIDGET (object), connection, error)) {
++		debug_print ("%s %d (%s): Unable to init plugin UI.\n", __FILE__, __LINE__, __func__);
+ 		g_object_unref (object);
+ 		return NULL;
+ 	}
+ 
++	debug_print ("%s %d (%s)\n", __FILE__, __LINE__, __func__);
+ 	return object;
+ }
+ 
+-static gboolean
+-save_secrets (NMVpnPluginUiWidgetInterface *iface,
+-              NMConnection *connection,
+-			                GError **error)
+-{
+-	return TRUE;
+-}
+-
+ static void
+ dispose (GObject *object)
+ {
+ 	IkecPluginUiWidget *plugin = IKEC_PLUGIN_UI_WIDGET (object);
+ 	IkecPluginUiWidgetPrivate *priv = IKEC_PLUGIN_UI_WIDGET_GET_PRIVATE (plugin);
+ 
+-	if (priv->group)
+-		g_object_unref (priv->group);
+-
+ 	if (priv->widget)
+ 		g_object_unref (priv->widget);
+ 
+@@ -422,6 +492,7 @@ ikec_plugin_ui_widget_class_init (IkecPl
+ static void
+ ikec_plugin_ui_widget_init (IkecPluginUiWidget *plugin)
+ {
++	debug_print ("%s %d (%s)\n", __FILE__, __LINE__, __func__);
+ }
+ 
+ static void
+@@ -430,7 +501,6 @@ ikec_plugin_ui_widget_interface_init (NM
+ 	/* interface implementation */
+ 	iface_class->get_widget = get_widget;
+ 	iface_class->update_connection = update_connection;
+-	iface_class->save_secrets = save_secrets;
+ }
+ 
+ static NMConnection *
+@@ -442,7 +512,7 @@ import_from_file (NMVpnPluginUiInterface
+ 	const char *tmp;
+ 	bool need_certs = false;
+ 
+-	fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++	debug_print ("%s %d (%s)\n", __FILE__, __LINE__, __func__);
+ 
+ 	tmp = strrchr(path, '.');
+ 	if (tmp && !strcasecmp(tmp, ".pcf") && !config.file_import_pcf (path, need_certs)) {
+@@ -468,11 +538,11 @@ import_from_file (NMVpnPluginUiInterface
+ 		}
+ 		if (cfgdat->type == DATA_STRING) {
+ 			nm_setting_vpn_add_data_item (s_vpn, cfgdat->key.text(), cfgdat->vval.text());
+-			fprintf (stderr, "%s %d (%s): %s: (%s)\n", __FILE__, __LINE__, __func__, cfgdat->key.text(), cfgdat->vval.text());
++			debug_print ("%s %d (%s): %s: (%s)\n", __FILE__, __LINE__, __func__, cfgdat->key.text(), cfgdat->vval.text());
+ 		} else if (cfgdat->type == DATA_NUMBER) {
+ 			char buf[64] = {0};
+ 			snprintf(buf, sizeof(buf), "%li", cfgdat->nval);
+-			fprintf (stderr, "%s %d (%s): %s: (%s)\n", __FILE__, __LINE__, __func__, cfgdat->key.text(), buf);
++			debug_print ("%s %d (%s): %s: (%s)\n", __FILE__, __LINE__, __func__, cfgdat->key.text(), buf);
+ 			nm_setting_vpn_add_data_item (s_vpn, cfgdat->key.text(), buf);
+ 		} else if (cfgdat->type == DATA_BINARY) {
+ 			BDATA b64;
+@@ -481,7 +551,7 @@ import_from_file (NMVpnPluginUiInterface
+ 			nm_setting_vpn_add_data_item (s_vpn, cfgdat->key.text(), b64.text());
+ 		}
+ 	}
+-	g_warning ("(%d): s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, connection: %p", __LINE__, s_vpn, NM_IS_SETTING_VPN (s_vpn), connection);
++	debug_print ("(%d): s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, connection: %p", __LINE__, s_vpn, NM_IS_SETTING_VPN (s_vpn), connection);
+ 	nm_connection_add_setting (connection, NM_SETTING (s_vpn));
+ 
+ 	return connection;
+--- ike-2.2.1+dfsg.orig/source/nm-ikec/nm-ikec-props.glade
++++ /dev/null
+@@ -1,200 +0,0 @@
+-<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+-<!DOCTYPE glade-interface SYSTEM "glade-2.0.dtd">
+-<!--*- mode: xml -*-->
+-<glade-interface>
+-  <widget class="GtkWindow" id="ikec-widget">
+-    <property name="title" translatable="yes">window1</property>
+-    <child>
+-      <widget class="GtkVBox" id="ikec-vbox">
+-        <property name="visible">True</property>
+-        <property name="border_width">12</property>
+-        <property name="spacing">16</property>
+-        <child>
+-          <widget class="GtkVBox" id="vbox8">
+-            <property name="visible">True</property>
+-            <property name="spacing">6</property>
+-            <child>
+-              <widget class="GtkLabel" id="label22">
+-                <property name="visible">True</property>
+-                <property name="xalign">0</property>
+-                <property name="label" translatable="yes">&lt;b&gt;General&lt;/b&gt;</property>
+-                <property name="use_markup">True</property>
+-              </widget>
+-              <packing>
+-                <property name="expand">False</property>
+-                <property name="fill">False</property>
+-              </packing>
+-            </child>
+-            <child>
+-              <widget class="GtkAlignment" id="alignment8">
+-                <property name="visible">True</property>
+-                <property name="left_padding">12</property>
+-                <child>
+-                  <widget class="GtkTable" id="table2">
+-                    <property name="visible">True</property>
+-                    <property name="n_rows">5</property>
+-                    <property name="n_columns">3</property>
+-                    <property name="column_spacing">6</property>
+-                    <property name="row_spacing">6</property>
+-                    <child>
+-                      <placeholder/>
+-                    </child>
+-                    <child>
+-                      <placeholder/>
+-                    </child>
+-                    <child>
+-                      <placeholder/>
+-                    </child>
+-                    <child>
+-                      <placeholder/>
+-                    </child>
+-                    <child>
+-                      <widget class="GtkLabel" id="label23">
+-                        <property name="visible">True</property>
+-                        <property name="xalign">0</property>
+-                        <property name="label" translatable="yes">_Gateway:</property>
+-                        <property name="use_underline">True</property>
+-                        <property name="mnemonic_widget">gateway_entry</property>
+-                      </widget>
+-                      <packing>
+-                        <property name="x_options">GTK_FILL</property>
+-                        <property name="y_options"></property>
+-                      </packing>
+-                    </child>
+-                    <child>
+-                      <widget class="GtkEntry" id="gateway_entry">
+-                        <property name="visible">True</property>
+-                        <property name="can_focus">True</property>
+-                      </widget>
+-                      <packing>
+-                        <property name="left_attach">1</property>
+-                        <property name="right_attach">2</property>
+-                        <property name="y_options"></property>
+-                      </packing>
+-                    </child>
+-                    <child>
+-                      <widget class="GtkLabel" id="label24">
+-                        <property name="visible">True</property>
+-                        <property name="xalign">0</property>
+-                        <property name="label" translatable="yes">_IKE Port:</property>
+-                        <property name="use_underline">True</property>
+-                        <property name="mnemonic_widget">gateway_port</property>
+-                      </widget>
+-                      <packing>
+-                        <property name="x_options">GTK_FILL</property>
+-                        <property name="y_options"></property>
+-                        <property name="top_attach">1</property>
+-                        <property name="bottom_attach">2</property>
+-                      </packing>
+-                    </child>
+-                    <child>
+-                      <widget class="GtkEntry" id="gateway_port">
+-                        <property name="visible">True</property>
+-                        <property name="can_focus">True</property>
+-                      </widget>
+-                      <packing>
+-                        <property name="top_attach">1</property>
+-                        <property name="bottom_attach">2</property>
+-                        <property name="left_attach">1</property>
+-                        <property name="right_attach">2</property>
+-                        <property name="y_options"></property>
+-                      </packing>
+-                    </child>
+-                  </widget>
+-                </child>
+-              </widget>
+-              <packing>
+-                <property name="position">1</property>
+-              </packing>
+-            </child>
+-          </widget>
+-          <packing>
+-            <property name="expand">False</property>
+-          </packing>
+-        </child>
+-        <child>
+-          <widget class="GtkVBox" id="vbox11">
+-            <property name="visible">True</property>
+-            <property name="spacing">6</property>
+-            <child>
+-              <widget class="GtkLabel" id="label25">
+-                <property name="visible">True</property>
+-                <property name="xalign">0</property>
+-                <property name="label" translatable="yes">&lt;b&gt;Optional&lt;/b&gt;</property>
+-                <property name="use_markup">True</property>
+-              </widget>
+-              <packing>
+-                <property name="expand">False</property>
+-                <property name="fill">False</property>
+-              </packing>
+-            </child>
+-            <child>
+-              <widget class="GtkAlignment" id="alignment9">
+-                <property name="visible">True</property>
+-                <property name="left_padding">12</property>
+-                <child>
+-                  <widget class="GtkTable" id="table3">
+-                    <property name="visible">True</property>
+-                    <property name="n_rows">5</property>
+-                    <property name="n_columns">2</property>
+-                    <property name="column_spacing">6</property>
+-                    <property name="row_spacing">6</property>
+-                    <child>
+-                      <placeholder/>
+-                    </child>
+-                    <child>
+-                      <widget class="GtkCheckButton" id="disable_dpd_checkbutton">
+-                        <property name="visible">True</property>
+-                        <property name="can_focus">True</property>
+-                        <property name="label" translatable="yes">Disable Dead Peer Detection</property>
+-                        <property name="response_id">0</property>
+-                        <property name="draw_indicator">True</property>
+-                      </widget>
+-                      <packing>
+-                        <property name="left_attach">1</property>
+-                        <property name="right_attach">2</property>
+-                        <property name="top_attach">4</property>
+-                        <property name="bottom_attach">5</property>
+-                      </packing>
+-                    </child>
+-                    <child>
+-                      <widget class="GtkLabel" id="label2">
+-                        <property name="visible">True</property>
+-                        <property name="xalign">0</property>
+-                        <property name="label" translatable="yes">NAT traversal:</property>
+-                      </widget>
+-                      <packing>
+-                        <property name="top_attach">3</property>
+-                        <property name="bottom_attach">4</property>
+-                      </packing>
+-                    </child>
+-                    <child>
+-                      <widget class="GtkComboBox" id="natt_combo">
+-                        <property name="visible">True</property>
+-                        <property name="items" translatable="yes"> </property>
+-                      </widget>
+-                      <packing>
+-                        <property name="left_attach">1</property>
+-                        <property name="right_attach">2</property>
+-                        <property name="top_attach">3</property>
+-                        <property name="bottom_attach">4</property>
+-                      </packing>
+-                    </child>
+-                  </widget>
+-                </child>
+-              </widget>
+-              <packing>
+-                <property name="position">1</property>
+-              </packing>
+-            </child>
+-          </widget>
+-          <packing>
+-            <property name="expand">False</property>
+-            <property name="fill">False</property>
+-            <property name="position">1</property>
+-          </packing>
+-        </child>
+-      </widget>
+-    </child>
+-  </widget>
+-</glade-interface>
+--- ike-2.2.1+dfsg.orig/source/nm-ikec/nm-ikec-props.ui
++++ ike-2.2.1+dfsg/source/nm-ikec/nm-ikec-props.ui
+@@ -1,214 +1,672 @@
+-<?xml version="1.0"?>
+-<!--*- mode: xml -*-->
++<?xml version="1.0" encoding="UTF-8"?>
++<!-- Generated with glade 3.18.3 -->
+ <interface>
+-  <object class="GtkListStore" id="model1">
++  <requires lib="gtk+" version="3.12"/>
++  <object class="GtkListStore" id="auto_config_list">
+     <columns>
++      <!-- column-name dIsplay -->
++      <column type="gchararray"/>
++      <!-- column-name value -->
++      <column type="gchararray"/>
++    </columns>
++    <data>
++      <row>
++        <col id="0" translatable="yes">DHCP over IPsec</col>
++        <col id="1">dhcp</col>
++      </row>
++      <row>
++        <col id="0" translatable="yes">IKE config pull</col>
++        <col id="1">pull</col>
++      </row>
++    </data>
++  </object>
++  <object class="GtkListStore" id="network_frag_mode_list">
++    <columns>
++      <!-- column-name gchararray1 -->
+       <column type="gchararray"/>
+     </columns>
+     <data>
+       <row>
+-        <col id="0" translatable="yes"> </col>
++        <col id="0" translatable="yes">disable</col>
++      </row>
++      <row>
++        <col id="0" translatable="yes">enable</col>
++      </row>
++      <row>
++        <col id="0" translatable="yes">force</col>
+       </row>
+     </data>
+   </object>
+-  <object class="GtkWindow" id="ikec-widget">
+-    <property name="title" translatable="yes">window1</property>
++  <object class="GtkListStore" id="network_natt_mode_list">
++    <columns>
++      <!-- column-name gchararray1 -->
++      <column type="gchararray"/>
++    </columns>
++    <data>
++      <row>
++        <col id="0" translatable="yes">enable</col>
++      </row>
++      <row>
++        <col id="0" translatable="yes">disable</col>
++      </row>
++      <row>
++        <col id="0" translatable="yes">force-draft</col>
++      </row>
++      <row>
++        <col id="0" translatable="yes">force-rfc</col>
++      </row>
++      <row>
++        <col id="0" translatable="yes">force-cisco-udp</col>
++      </row>
++    </data>
++  </object>
++  <object class="GtkNotebook" id="ikec-vbox">
++    <property name="visible">True</property>
++    <property name="can_focus">True</property>
++    <property name="enable_popup">True</property>
+     <child>
+-      <object class="GtkVBox" id="ikec-vbox">
++      <object class="GtkFrame" id="Genera">
+         <property name="visible">True</property>
+-        <property name="border_width">12</property>
+-        <property name="spacing">16</property>
++        <property name="can_focus">False</property>
++        <property name="label_xalign">0</property>
++        <property name="shadow_type">none</property>
+         <child>
+-          <object class="GtkVBox" id="vbox8">
++          <object class="GtkAlignment" id="alignment1">
+             <property name="visible">True</property>
+-            <property name="spacing">6</property>
++            <property name="can_focus">False</property>
++            <property name="left_padding">12</property>
+             <child>
+-              <object class="GtkLabel" id="label22">
++              <object class="GtkGrid" id="grid2">
+                 <property name="visible">True</property>
+-                <property name="xalign">0</property>
+-                <property name="label" translatable="yes">&lt;b&gt;General&lt;/b&gt;</property>
+-                <property name="use_markup">True</property>
++                <property name="can_focus">False</property>
++                <child>
++                  <object class="GtkLabel" id="label">
++                    <property name="visible">True</property>
++                    <property name="can_focus">False</property>
++                    <property name="label" translatable="yes">Host:</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">0</property>
++                    <property name="top_attach">0</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkLabel" id="label4">
++                    <property name="visible">True</property>
++                    <property name="can_focus">False</property>
++                    <property name="label" translatable="yes">Port:</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">0</property>
++                    <property name="top_attach">1</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkLabel" id="label5">
++                    <property name="visible">True</property>
++                    <property name="can_focus">False</property>
++                    <property name="label" translatable="yes">Auto Config:</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">0</property>
++                    <property name="top_attach">2</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkEntry" id="network-host">
++                    <property name="visible">True</property>
++                    <property name="can_focus">True</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">1</property>
++                    <property name="top_attach">0</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkEntry" id="network-ike-port">
++                    <property name="visible">True</property>
++                    <property name="can_focus">True</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">1</property>
++                    <property name="top_attach">1</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkComboBox" id="client-auto-mode">
++                    <property name="visible">True</property>
++                    <property name="can_focus">False</property>
++                    <property name="model">auto_config_list</property>
++                    <property name="has_entry">True</property>
++                    <property name="entry_text_column">0</property>
++                    <property name="id_column">1</property>
++                    <child internal-child="entry">
++                      <object class="GtkEntry" id="combobox-entry1">
++                        <property name="can_focus">False</property>
++                      </object>
++                    </child>
++                  </object>
++                  <packing>
++                    <property name="left_attach">1</property>
++                    <property name="top_attach">2</property>
++                  </packing>
++                </child>
+               </object>
+-              <packing>
+-                <property name="expand">False</property>
+-                <property name="fill">False</property>
+-              </packing>
+             </child>
++          </object>
++        </child>
++        <child type="label">
++          <object class="GtkLabel" id="label1">
++            <property name="visible">True</property>
++            <property name="can_focus">False</property>
++            <property name="label" translatable="yes">Remote Host</property>
++          </object>
++        </child>
++      </object>
++    </child>
++    <child type="tab">
++      <object class="GtkLabel" id="labe">
++        <property name="visible">True</property>
++        <property name="can_focus">False</property>
++        <property name="label" translatable="yes">General</property>
++      </object>
++      <packing>
++        <property name="tab_fill">False</property>
++      </packing>
++    </child>
++    <child>
++      <object class="GtkFrame" id="frame1">
++        <property name="visible">True</property>
++        <property name="can_focus">False</property>
++        <property name="label_xalign">0</property>
++        <property name="shadow_type">none</property>
++        <child>
++          <object class="GtkAlignment" id="alignment2">
++            <property name="visible">True</property>
++            <property name="can_focus">False</property>
++            <property name="left_padding">12</property>
+             <child>
+-              <object class="GtkAlignment" id="alignment8">
++              <object class="GtkGrid" id="grid3">
+                 <property name="visible">True</property>
+-                <property name="left_padding">12</property>
++                <property name="can_focus">False</property>
+                 <child>
+-                  <object class="GtkTable" id="table2">
++                  <object class="GtkLabel" id="label6">
+                     <property name="visible">True</property>
+-                    <property name="n_rows">5</property>
+-                    <property name="n_columns">3</property>
+-                    <property name="column_spacing">6</property>
+-                    <property name="row_spacing">6</property>
+-                    <child>
+-                      <placeholder/>
++                    <property name="can_focus">False</property>
++                    <property name="label" translatable="yes">NAT Traversal</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">0</property>
++                    <property name="top_attach">0</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkLabel" id="label7">
++                    <property name="visible">True</property>
++                    <property name="can_focus">False</property>
++                    <property name="label" translatable="yes">NAT Traversal Port</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">0</property>
++                    <property name="top_attach">1</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkLabel" id="label8">
++                    <property name="visible">True</property>
++                    <property name="can_focus">False</property>
++                    <property name="label" translatable="yes">Keep-Alive Packet Rate</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">0</property>
++                    <property name="top_attach">2</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkLabel" id="label9">
++                    <property name="visible">True</property>
++                    <property name="can_focus">False</property>
++                    <property name="label" translatable="yes">IKE Fragmentation</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">0</property>
++                    <property name="top_attach">3</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkLabel" id="label10">
++                    <property name="visible">True</property>
++                    <property name="can_focus">False</property>
++                    <property name="label" translatable="yes">Maximum Packet Size</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">0</property>
++                    <property name="top_attach">4</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkLabel" id="label11">
++                    <property name="visible">True</property>
++                    <property name="can_focus">False</property>
++                    <property name="label" translatable="yes">Network MTU</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">0</property>
++                    <property name="top_attach">5</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkComboBox" id="network-natt-mode-box">
++                    <property name="visible">True</property>
++                    <property name="can_focus">False</property>
++                    <property name="model">network_natt_mode_list</property>
++                    <property name="active">0</property>
++                    <property name="has_entry">True</property>
++                    <property name="entry_text_column">0</property>
++                    <property name="id_column">0</property>
++                    <child internal-child="entry">
++                      <object class="GtkEntry" id="network-natt-mode">
++                        <property name="can_focus">False</property>
++                      </object>
+                     </child>
+-                    <child>
+-                      <placeholder/>
++                  </object>
++                  <packing>
++                    <property name="left_attach">1</property>
++                    <property name="top_attach">0</property>
++                    <property name="width">2</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkEntry" id="network-natt-port">
++                    <property name="visible">True</property>
++                    <property name="can_focus">True</property>
++                    <property name="input_purpose">number</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">1</property>
++                    <property name="top_attach">1</property>
++                    <property name="width">2</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkEntry" id="network-natt-rate">
++                    <property name="visible">True</property>
++                    <property name="can_focus">True</property>
++                    <property name="input_purpose">number</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">1</property>
++                    <property name="top_attach">2</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkComboBox" id="network-frag-mode">
++                    <property name="visible">True</property>
++                    <property name="can_focus">False</property>
++                    <property name="model">network_frag_mode_list</property>
++                    <property name="active">0</property>
++                    <property name="has_entry">True</property>
++                    <property name="entry_text_column">0</property>
++                    <property name="id_column">0</property>
++                    <child internal-child="entry">
++                      <object class="GtkEntry" id="combobox-entry">
++                        <property name="can_focus">False</property>
++                      </object>
+                     </child>
++                  </object>
++                  <packing>
++                    <property name="left_attach">1</property>
++                    <property name="top_attach">3</property>
++                    <property name="width">2</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkEntry" id="network-frag-size">
++                    <property name="visible">True</property>
++                    <property name="can_focus">True</property>
++                    <property name="input_purpose">number</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">1</property>
++                    <property name="top_attach">4</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkLabel" id="label12">
++                    <property name="visible">True</property>
++                    <property name="can_focus">False</property>
++                    <property name="label" translatable="yes">Bytes</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">2</property>
++                    <property name="top_attach">4</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkLabel" id="label13">
++                    <property name="visible">True</property>
++                    <property name="can_focus">False</property>
++                    <property name="label" translatable="yes">Seconds</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">2</property>
++                    <property name="top_attach">2</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkLabel" id="label14">
++                    <property name="visible">True</property>
++                    <property name="can_focus">False</property>
++                    <property name="label" translatable="yes">Bytes</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">2</property>
++                    <property name="top_attach">5</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkEntry" id="network-mtu-size">
++                    <property name="visible">True</property>
++                    <property name="can_focus">True</property>
++                    <property name="input_purpose">number</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">1</property>
++                    <property name="top_attach">5</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkCheckButton" id="network-dpd-enable">
++                    <property name="label" translatable="yes">Enable Dead Peer Detection</property>
++                    <property name="visible">True</property>
++                    <property name="can_focus">True</property>
++                    <property name="receives_default">False</property>
++                    <property name="xalign">0</property>
++                    <property name="draw_indicator">True</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">0</property>
++                    <property name="top_attach">7</property>
++                    <property name="width">3</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkCheckButton" id="network-notify-enable">
++                    <property name="label" translatable="yes">Enable ISAKMP Failure Notifications</property>
++                    <property name="visible">True</property>
++                    <property name="can_focus">True</property>
++                    <property name="receives_default">False</property>
++                    <property name="xalign">0</property>
++                    <property name="draw_indicator">True</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">0</property>
++                    <property name="top_attach">8</property>
++                    <property name="width">3</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkCheckButton" id="client-banner-enable">
++                    <property name="label" translatable="yes">Enable Client Login Banner</property>
++                    <property name="visible">True</property>
++                    <property name="can_focus">True</property>
++                    <property name="receives_default">False</property>
++                    <property name="xalign">0</property>
++                    <property name="draw_indicator">True</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">0</property>
++                    <property name="top_attach">9</property>
++                    <property name="width">3</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkLabel" id="label15">
++                    <property name="visible">True</property>
++                    <property name="can_focus">False</property>
++                    <property name="ypad">3</property>
++                    <property name="label" translatable="yes">Other Options</property>
++                    <property name="xalign">0</property>
++                    <attributes>
++                      <attribute name="weight" value="bold"/>
++                    </attributes>
++                  </object>
++                  <packing>
++                    <property name="left_attach">0</property>
++                    <property name="top_attach">6</property>
++                    <property name="width">3</property>
++                  </packing>
++                </child>
++              </object>
++            </child>
++          </object>
++        </child>
++        <child type="label">
++          <object class="GtkLabel" id="frame">
++            <property name="visible">True</property>
++            <property name="can_focus">False</property>
++            <property name="label" translatable="yes">Firewall / Network Options</property>
++          </object>
++        </child>
++      </object>
++      <packing>
++        <property name="position">1</property>
++      </packing>
++    </child>
++    <child type="tab">
++      <object class="GtkLabel" id="label2">
++        <property name="visible">True</property>
++        <property name="can_focus">False</property>
++        <property name="label" translatable="yes">Client</property>
++      </object>
++      <packing>
++        <property name="position">1</property>
++        <property name="tab_fill">False</property>
++      </packing>
++    </child>
++    <child>
++      <object class="GtkBox" id="box1">
++        <property name="visible">True</property>
++        <property name="can_focus">False</property>
++        <property name="orientation">vertical</property>
++        <child>
++          <object class="GtkFrame" id="frame2">
++            <property name="visible">True</property>
++            <property name="can_focus">False</property>
++            <property name="hexpand">True</property>
++            <property name="vexpand">True</property>
++            <property name="label_xalign">0</property>
++            <property name="shadow_type">none</property>
++            <child>
++              <object class="GtkAlignment" id="alignment3">
++                <property name="visible">True</property>
++                <property name="can_focus">False</property>
++                <property name="left_padding">12</property>
++                <child>
++                  <object class="GtkGrid" id="grid4">
++                    <property name="visible">True</property>
++                    <property name="can_focus">False</property>
+                     <child>
+-                      <placeholder/>
++                      <object class="GtkLabel" id="label17">
++                        <property name="visible">True</property>
++                        <property name="can_focus">False</property>
++                        <property name="label" translatable="yes">Server Certificate Authority</property>
++                      </object>
++                      <packing>
++                        <property name="left_attach">0</property>
++                        <property name="top_attach">0</property>
++                        <property name="width">2</property>
++                      </packing>
+                     </child>
+                     <child>
+-                      <placeholder/>
++                      <object class="GtkScrolledWindow" id="scrolledwindow1">
++                        <property name="width_request">600</property>
++                        <property name="height_request">100</property>
++                        <property name="visible">True</property>
++                        <property name="can_focus">True</property>
++                        <property name="hexpand">True</property>
++                        <property name="vexpand">True</property>
++                        <property name="shadow_type">in</property>
++                        <property name="overlay_scrolling">False</property>
++                        <child>
++                          <object class="GtkTextView" id="auth-server-cert-data">
++                            <property name="visible">True</property>
++                            <property name="can_focus">True</property>
++                            <property name="wrap_mode">word-char</property>
++                            <property name="monospace">True</property>
++                          </object>
++                        </child>
++                      </object>
++                      <packing>
++                        <property name="left_attach">0</property>
++                        <property name="top_attach">1</property>
++                        <property name="width">3</property>
++                        <property name="height">5</property>
++                      </packing>
+                     </child>
+                     <child>
+-                      <object class="GtkLabel" id="label23">
++                      <object class="GtkFileChooserButton" id="auth-server-cert-name">
+                         <property name="visible">True</property>
+-                        <property name="xalign">0</property>
+-                        <property name="label" translatable="yes">_Gateway:</property>
+-                        <property name="use_underline">True</property>
+-                        <property name="mnemonic_widget">gateway_entry</property>
++                        <property name="can_focus">False</property>
++                        <property name="create_folders">False</property>
++                        <property name="show_hidden">True</property>
+                       </object>
+                       <packing>
+-                        <property name="x_options">GTK_FILL</property>
+-                        <property name="y_options"/>
++                        <property name="left_attach">2</property>
++                        <property name="top_attach">0</property>
+                       </packing>
+                     </child>
+                     <child>
+-                      <object class="GtkEntry" id="gateway_entry">
++                      <object class="GtkLabel" id="label18">
+                         <property name="visible">True</property>
+-                        <property name="can_focus">True</property>
++                        <property name="can_focus">False</property>
++                        <property name="label" translatable="yes">Client Certificate</property>
+                       </object>
+                       <packing>
+-                        <property name="left_attach">1</property>
+-                        <property name="right_attach">2</property>
+-                        <property name="y_options"/>
++                        <property name="left_attach">0</property>
++                        <property name="top_attach">6</property>
++                        <property name="width">2</property>
+                       </packing>
+                     </child>
+                     <child>
+-                      <object class="GtkLabel" id="label24">
++                      <object class="GtkFileChooserButton" id="auth-client-cert-name">
+                         <property name="visible">True</property>
+-                        <property name="xalign">0</property>
+-                        <property name="label" translatable="yes">_IKE Port:</property>
+-                        <property name="use_underline">True</property>
+-                        <property name="mnemonic_widget">gateway_port</property>
++                        <property name="can_focus">False</property>
++                        <property name="create_folders">False</property>
++                        <property name="show_hidden">True</property>
+                       </object>
+                       <packing>
+-                        <property name="x_options">GTK_FILL</property>
+-                        <property name="y_options"/>
+-                        <property name="top_attach">1</property>
+-                        <property name="bottom_attach">2</property>
++                        <property name="left_attach">2</property>
++                        <property name="top_attach">6</property>
+                       </packing>
+                     </child>
+                     <child>
+-                      <object class="GtkEntry" id="gateway_port">
++                      <object class="GtkScrolledWindow" id="scrolledwindow2">
++                        <property name="height_request">100</property>
+                         <property name="visible">True</property>
+                         <property name="can_focus">True</property>
++                        <property name="hexpand">True</property>
++                        <property name="vexpand">True</property>
++                        <property name="shadow_type">in</property>
++                        <child>
++                          <object class="GtkTextView" id="auth-client-cert-data">
++                            <property name="visible">True</property>
++                            <property name="can_focus">True</property>
++                            <property name="hexpand">True</property>
++                            <property name="vexpand">True</property>
++                            <property name="wrap_mode">word-char</property>
++                            <property name="monospace">True</property>
++                          </object>
++                        </child>
+                       </object>
+                       <packing>
+-                        <property name="top_attach">1</property>
+-                        <property name="bottom_attach">2</property>
+-                        <property name="left_attach">1</property>
+-                        <property name="right_attach">2</property>
+-                        <property name="y_options"/>
++                        <property name="left_attach">0</property>
++                        <property name="top_attach">7</property>
++                        <property name="width">3</property>
++                        <property name="height">5</property>
+                       </packing>
+                     </child>
+-                  </object>
+-                </child>
+-              </object>
+-              <packing>
+-                <property name="position">1</property>
+-              </packing>
+-            </child>
+-          </object>
+-          <packing>
+-            <property name="expand">False</property>
+-          </packing>
+-        </child>
+-        <child>
+-          <object class="GtkVBox" id="vbox11">
+-            <property name="visible">True</property>
+-            <property name="spacing">6</property>
+-            <child>
+-              <object class="GtkLabel" id="label25">
+-                <property name="visible">True</property>
+-                <property name="xalign">0</property>
+-                <property name="label" translatable="yes">&lt;b&gt;Optional&lt;/b&gt;</property>
+-                <property name="use_markup">True</property>
+-              </object>
+-              <packing>
+-                <property name="expand">False</property>
+-                <property name="fill">False</property>
+-              </packing>
+-            </child>
+-            <child>
+-              <object class="GtkAlignment" id="alignment9">
+-                <property name="visible">True</property>
+-                <property name="left_padding">12</property>
+-                <child>
+-                  <object class="GtkTable" id="table3">
+-                    <property name="visible">True</property>
+-                    <property name="n_rows">5</property>
+-                    <property name="n_columns">2</property>
+-                    <property name="column_spacing">6</property>
+-                    <property name="row_spacing">6</property>
+-                    <child>
+-                      <placeholder/>
+-                    </child>
+                     <child>
+-                      <object class="GtkCheckButton" id="disable_dpd_checkbutton">
++                      <object class="GtkLabel" id="label19">
+                         <property name="visible">True</property>
+-                        <property name="can_focus">True</property>
+-                        <property name="label" translatable="yes">Disable Dead Peer Detection</property>
+-                        <property name="draw_indicator">True</property>
++                        <property name="can_focus">False</property>
++                        <property name="label" translatable="yes">Client Key</property>
+                       </object>
+                       <packing>
+-                        <property name="left_attach">1</property>
+-                        <property name="right_attach">2</property>
+-                        <property name="top_attach">4</property>
+-                        <property name="bottom_attach">5</property>
++                        <property name="left_attach">0</property>
++                        <property name="top_attach">12</property>
++                        <property name="width">2</property>
+                       </packing>
+                     </child>
+                     <child>
+-                      <object class="GtkLabel" id="label2">
++                      <object class="GtkFileChooserButton" id="auth-client-key-name">
+                         <property name="visible">True</property>
+-                        <property name="xalign">0</property>
+-                        <property name="label" translatable="yes">NAT traversal:</property>
++                        <property name="can_focus">False</property>
++                        <property name="create_folders">False</property>
++                        <property name="show_hidden">True</property>
+                       </object>
+                       <packing>
+-                        <property name="top_attach">3</property>
+-                        <property name="bottom_attach">4</property>
++                        <property name="left_attach">2</property>
++                        <property name="top_attach">12</property>
+                       </packing>
+                     </child>
+                     <child>
+-                      <object class="GtkComboBox" id="natt_combo">
++                      <object class="GtkScrolledWindow" id="scrolledwindow3">
++                        <property name="height_request">100</property>
+                         <property name="visible">True</property>
+-                        <property name="model">model1</property>
++                        <property name="can_focus">True</property>
++                        <property name="hexpand">True</property>
++                        <property name="vexpand">True</property>
++                        <property name="shadow_type">in</property>
+                         <child>
+-                          <object class="GtkCellRendererText" id="renderer1"/>
+-                          <attributes>
+-                            <attribute name="text">0</attribute>
+-                          </attributes>
++                          <object class="GtkTextView" id="auth-client-key-data">
++                            <property name="visible">True</property>
++                            <property name="can_focus">True</property>
++                            <property name="wrap_mode">word-char</property>
++                            <property name="monospace">True</property>
++                          </object>
+                         </child>
+                       </object>
+                       <packing>
+-                        <property name="left_attach">1</property>
+-                        <property name="right_attach">2</property>
+-                        <property name="top_attach">3</property>
+-                        <property name="bottom_attach">4</property>
++                        <property name="left_attach">0</property>
++                        <property name="top_attach">13</property>
++                        <property name="width">3</property>
++                        <property name="height">5</property>
+                       </packing>
+                     </child>
+                   </object>
+                 </child>
+               </object>
+-              <packing>
+-                <property name="position">1</property>
+-              </packing>
++            </child>
++            <child type="label">
++              <object class="GtkLabel" id="label16">
++                <property name="visible">True</property>
++                <property name="can_focus">False</property>
++                <property name="label" translatable="yes">Credentials</property>
++              </object>
+             </child>
+           </object>
+           <packing>
+             <property name="expand">False</property>
+-            <property name="fill">False</property>
+-            <property name="position">1</property>
++            <property name="fill">True</property>
++            <property name="position">0</property>
+           </packing>
+         </child>
+       </object>
++      <packing>
++        <property name="position">2</property>
++      </packing>
++    </child>
++    <child type="tab">
++      <object class="GtkLabel" id="label3">
++        <property name="visible">True</property>
++        <property name="can_focus">False</property>
++        <property name="label" translatable="yes">Authentication</property>
++      </object>
++      <packing>
++        <property name="position">2</property>
++        <property name="tab_fill">False</property>
++      </packing>
+     </child>
+   </object>
+ </interface>

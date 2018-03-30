@@ -1,0 +1,4 @@
+debian/ike.desktop usr/share/applications/
+usr/bin/qikea
+usr/bin/qikec
+source/qikea/png/ikea.png usr/share/pixmaps/

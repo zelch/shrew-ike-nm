@@ -1,0 +1,33 @@
+Description: Add support for forcing cisco natt.
+ Dunno if it will help, but.
+ .
+ ike (2.2.1+dfsg-2ubuntu1.JP.01) trusty; urgency=low
+ .
+   * Port over all of the JetPay Network Manager code to the 2.2.1 release.
+Author: Zephaniah E. Loss-Cutler-Hull <zhull@jetpay.com>
+
+---
+The information above should follow the Patch Tagging Guidelines, please
+checkout http://dep.debian.net/deps/dep3/ to learn about the format. Here
+are templates for supplementary fields that you might want to add:
+
+Origin: <vendor|upstream|other>, <url of original patch>
+Bug: <url in upstream bugtracker>
+Bug-Debian: http://bugs.debian.org/<bugnumber>
+Bug-Ubuntu: https://launchpad.net/bugs/<bugnumber>
+Forwarded: <no|not-needed|url proving that it has been forwarded>
+Reviewed-By: <name and email of someone who approved the patch>
+Last-Update: <YYYY-MM-DD>
+
+--- ike-2.2.1+dfsg.orig/source/nm-ikec/ikec.cpp
++++ ike-2.2.1+dfsg/source/nm-ikec/ikec.cpp
+@@ -641,6 +641,9 @@ long _IKEC_NM::func( void * )
+ 		if( !strcmp( "force-rfc", text ) )
+ 			peer.natt_mode = IPSEC_NATT_FORCE_RFC;
+ 
++		if( !strcmp( "force-cisco", text ) )
++			peer.natt_mode = IPSEC_NATT_FORCE_CISCO;
++
+ 		// nat-t udp port
+ 
+ 		text = nm_setting_vpn_get_data_item (s_vpn, "network-natt-port");

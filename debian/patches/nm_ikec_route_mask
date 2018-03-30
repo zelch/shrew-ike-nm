@@ -1,0 +1,63 @@
+Description: Fix the route prefix size parsing.
+ On x86, you can't just loop through the bits until you find one unset, because
+ things may not be in the byte and bit order that this would work for.
+ .
+ As such, just check for all set bits.
+ .
+ This would cause problems if we were ever given an outright invalid netmask,
+ but if we have an outright invalid netmask this behavior isn't any _more_
+ broken than anything else we could be doing.
+ .
+ ike (2.2.1+dfsg-4.JP.05+xenial) xenial; urgency=low
+ .
+   * Fix handling for /21 network block sizes.
+Author: Zephaniah E. Loss-Cutler-Hull <zhull@jetpay.com>
+
+---
+The information above should follow the Patch Tagging Guidelines, please
+checkout http://dep.debian.net/deps/dep3/ to learn about the format. Here
+are templates for supplementary fields that you might want to add:
+
+Origin: <vendor|upstream|other>, <url of original patch>
+Bug: <url in upstream bugtracker>
+Bug-Debian: https://bugs.debian.org/<bugnumber>
+Bug-Ubuntu: https://launchpad.net/bugs/<bugnumber>
+Forwarded: <no|not-needed|url proving that it has been forwarded>
+Reviewed-By: <name and email of someone who approved the patch>
+Last-Update: <YYYY-MM-DD>
+
+--- ike-2.2.1+dfsg.orig/source/nm-ikec/ikec.cpp
++++ ike-2.2.1+dfsg/source/nm-ikec/ikec.cpp
+@@ -1735,7 +1735,7 @@ IKEI_MSGID_CLIENT_err:
+ 
+ 			case IKEI_MSGID_ROUTE:
+ 			{
+-				guint32 prefix = 0, metric = 100;
++				guint32 i = 0, prefix = 0, metric = 100;
+ 				IPROUTE_ENTRY route_entry;
+ 				GArray *array;
+ 				long type = 0;
+@@ -1752,7 +1752,13 @@ IKEI_MSGID_CLIENT_err:
+ 					is_full = 1;
+ 					g_warning ("%d: Non-split tunnel.", __LINE__);
+ 				    } else {
+-					for (prefix = 0; prefix < 32 && route_entry.mask.s_addr & (1 << prefix); prefix++);
++					// Just stopping at the first bit not set breaks for something like a /21 netblock,
++					// due to the byte and bit orders not being as helpful as they could be.
++					for (i = 0; i < 32; i++) {
++					    if (route_entry.mask.s_addr & (1 << i)) {
++						prefix++;
++					    }
++					}
+ 
+ 					array = g_array_sized_new (FALSE, TRUE, sizeof (guint32), 4);
+ 					g_array_append_val (array, route_entry.addr.s_addr);
+@@ -1760,7 +1766,7 @@ IKEI_MSGID_CLIENT_err:
+ 					g_array_append_val (array, route_entry.next.s_addr);
+ 					g_array_append_val (array, metric);
+ 					g_ptr_array_add (routes, array);
+-					g_warning("Added route: %s/%d (metric %d)", inet_ntoa(route_entry.addr), prefix, metric);
++					g_warning("Added route: %s/%d (metric %d) (mask: %04X)", inet_ntoa(route_entry.addr), prefix, metric, route_entry.mask.s_addr);
+ 					g_warning("Route via: %s, is_full %d", inet_ntoa(route_entry.next), is_full);
+ 				    }
+ 				}

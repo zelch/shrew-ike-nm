@@ -1,0 +1,187 @@
+ike (2.2.1+dfsg-4.JP.09+xenial) xenial; urgency=low
+
+  * Add support for vti0 as a virtual interface, this is done horridly in the
+    nm-ikec plugin.
+
+ -- Zephaniah E. Loss-Cutler-Hull <zhull@jetpay.com>  Wed, 05 Apr 2017 19:55:26 -0700
+
+ike (2.2.1+dfsg-4.JP.08+xenial) xenial; urgency=low
+
+  * Have NetworkManager handle the IP config, at least in theory.
+
+ -- Zephaniah E. Loss-Cutler-Hull <zhull@jetpay.com>  Mon, 13 Mar 2017 22:09:26 -0700
+
+ike (2.2.1+dfsg-4.JP.07+xenial) xenial; urgency=low
+
+  * Don't tell NetworkManager that we can handle multiple VPN connections, we
+    don't handle the DBUS side of that, and so it doesn't work reliably on
+    16.04.
+  * Set the dbus permissions way too permissively, allowing anyone to talk to
+    the VPN connection.  This isn't ideal, but it actually works.
+
+ -- Zephaniah E. Loss-Cutler-Hull <zhull@jetpay.com>  Fri, 11 Nov 2016 14:55:45 -0800
+
+ike (2.2.1+dfsg-4.JP.06+xenial) xenial; urgency=low
+
+  * Fix the UI for Ubuntu 14.04 systems.
+
+ -- Zephaniah E. Loss-Cutler-Hull <zhull@jetpay.com>  Wed, 21 Sep 2016 15:28:32 -0700
+
+ike (2.2.1+dfsg-4.JP.05+xenial) xenial; urgency=low
+
+  * Fix handling for /21 network block sizes.
+
+ -- Zephaniah E. Loss-Cutler-Hull <zhull@jetpay.com>  Wed, 21 Sep 2016 14:40:01 -0700
+
+ike (2.2.1+dfsg-4.JP.04+xenial) xenial; urgency=low
+
+  * Add the network manager dev packages to the builddeps.
+  * Add the distribution name to the version to make it easier to build for
+    14.04 and 16.04 from the same package.
+  * Add some links so that we can build a functional package for 14.04.
+
+ -- Zephaniah E. Loss-Cutler-Hull <zhull@jetpay.com>  Thu, 28 Jul 2016 14:37:31 -0700
+
+ike (2.2.1+dfsg-4.JP.03) trusty; urgency=low
+
+  * More work on the preferences dialogs.
+  * Fix the cert parsing and loading.
+
+ -- Zephaniah E. Loss-Cutler-Hull <zhull@jetpay.com>  Thu, 28 Jul 2016 11:51:25 -0700
+
+ike (2.2.1+dfsg-4.JP.02) trusty; urgency=low
+
+  * Major work on the preferences dialogs.
+
+ -- Zephaniah E. Loss-Cutler-Hull <zhull@jetpay.com>  Thu, 30 Jun 2016 00:21:02 -0700
+
+ike (2.2.1+dfsg-4.JP.01) trusty; urgency=low
+
+  * Update JetPay package to 16.04.
+
+ -- Zephaniah E. Loss-Cutler-Hull <zhull@jetpay.com>  Sun, 24 Apr 2016 07:18:32 -0700
+
+ike (2.2.1+dfsg-4) unstable; urgency=medium
+
+  * Link with pthread, fix FTBFS on arm64 (patch from Ubuntu).
+    Thanks to Daniel T Chen <crimsun@ubuntu.com>
+  * d/control: Add Vcs-{Git,Browser}
+  * Fix lintian warning empty-short-license-in-dep5-copyright
+  * Update Standards-Version to 3.9.6 (no further changes)
+
+ -- Christian Hofstaedtler <zeha@debian.org>  Sun, 28 Jun 2015 00:24:32 +0200
+
+ike (2.2.1+dfsg-3) unstable; urgency=medium
+
+  * Add patch fixing possible crash in qikea
+
+ -- Christian Hofstaedtler <zeha@debian.org>  Sun, 27 Jul 2014 01:07:47 +0200
+
+ike (2.2.1+dfsg-2) unstable; urgency=medium
+
+  * ike: Replace squeeze version of ike-qtgui (Closes: #734462)
+  * Bump Standards-Version to 3.9.5 (no changes)
+
+ -- Christian Hofstaedtler <zeha@debian.org>  Tue, 07 Jan 2014 15:22:27 +0100
+
+ike (2.2.1+dfsg-1) unstable; urgency=low
+
+  * New maintainer, reintroduce to unstable.
+  * New upstream version.
+    * GUI uses Qt4
+    * New ikec command line tool
+  * Conflict with ike-server meta-package, drop associated README.Debian
+  * drop wrapper scripts and replace them with RPATH
+  * Enable hardening flags
+  * Switch to debhelper 9
+  * Switch to source format 3.0 (quilt)
+  * Bump Standards-Version to 3.9.4
+  * Add Keywords to desktop file
+  * Fix Error in German description
+  * Expand Recommends
+
+ -- Christian Hofstaedtler <zeha@debian.org>  Sat, 21 Dec 2013 23:33:59 +0100
+
+ike (2.1.5+dfsg-2) unstable; urgency=medium
+
+  * Fix "CVE-2010-3361: insecure library loading" caused by LD_LIBRARY_PATH=:
+    in debian/wrappers/iked (Closes: #598292)
+  * Fix "CVE-2010-3361: insecure library loading" caused by LD_LIBRARY_PATH=:
+    in debian/wrappers/ike[ac] (Closes: #598293)
+
+ -- Philipp Matthias Hahn <pmhahn@debian.org>  Fri, 08 Oct 2010 14:57:57 +0200
+
+ike (2.1.5+dfsg-1) unstable; urgency=low
+
+  * New upstream version.
+  * debian/rules: update download-location.
+
+ -- Philipp Matthias Hahn <pmhahn@debian.org>  Sun, 06 Dec 2009 09:09:25 +0100
+
+ike (2.1.4+dfsg-4) unstable; urgency=low
+
+  * debian/watch: Chaneg to new location
+    http://www.shrew.net/download/ike/ike-(.*)-release.tgz
+
+ -- Philipp Matthias Hahn <pmhahn@debian.org>  Tue, 06 Oct 2009 10:46:53 +0200
+
+ike (2.1.4+dfsg-3) unstable; urgency=low
+
+  * Fix incorrect init.d dependencies and runlevel in script/iked.
+    (Closes: #545893) Thanks to Petter Reinholdtsen.
+  * debian/ike.{pre,post}{inst,rm}: Fix "package installation fails" by
+    ignoring errors during start on install. (Closes: #486656)
+  * debian/control:
+    - Standards-Version: 3.8.3: no changes required.
+    - ike: Add reference to other IKEv1 daemons.
+  * debian/rules: drop deprecated call of dh_desktop.
+
+ -- Philipp Matthias Hahn <pmhahn@debian.org>  Tue, 06 Oct 2009 10:29:12 +0200
+
+ike (2.1.4+dfsg-2) unstable; urgency=low
+
+  * Fix circular dependency with iked.h & conf.token.hpp. (Closes: #521951)
+  * debian/control: Standards-Version: 3.8.1
+    - Fix script/iked to not start iked.real multiple times.
+
+ -- Philipp Matthias Hahn <pmhahn@debian.org>  Tue, 07 Apr 2009 23:50:32 +0200
+
+ike (2.1.4+dfsg-1) unstable; urgency=low
+
+  * New upstream version.
+  * debian/watch: Fix download location.
+
+ -- Philipp Matthias Hahn <pmhahn@debian.org>  Thu, 13 Nov 2008 19:50:14 +0100
+
+ike (2.1.3+dfsg-1) unstable; urgency=low
+
+  * New upstream version. (Closes: #500139)
+    - bug in check of remote IPv4 address (Closes: #500027)
+  * debian/rules:
+    - "dh_makeshlibs -n" because libraries are not public
+    - Remove ${misc:Depends} from Depends-lines
+    - add source/ikea/conflict.h, source/iked/etkey to FILESTOCLEAN
+  * debian/wrapper/*
+    - Do exec instead of forking
+  * debian/control:
+    - Bump Standards-Version to 3.8.0: no changes required
+    - Adopt package on Nicolas request. Thanks for previous maintenance.
+  * debian/{control,copyright,init.d,rules}
+    - Strip trailing white spaces: s/\s\+$//
+  * source/iked/iked.{8,conf.5}
+    - Remove path-prefix /usr/local
+  * Use script/iked instead of debian/ike.init
+
+ -- Philipp Matthias Hahn <pmhahn@debian.org>  Wed, 22 Oct 2008 23:42:59 +0200
+
+ike (2.1.0+dfsg-1) unstable; urgency=low
+
+  * New upstream version.
+
+ -- Nicolas Deschildre <ndeschildre@gmail.com>  Wed, 28 May 2008 00:07:17 +0200
+
+ike (2.0.3+dfsg-1) unstable; urgency=low
+
+  * Initial release (Closes: #482589)
+
+ -- Nicolas Deschildre <ndeschildre@gmail.com>  Tue, 27 May 2008 19:45:32 +0200

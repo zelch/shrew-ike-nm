@@ -1,0 +1,51 @@
+#!/usr/bin/make -f
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+DPKG_EXPORT_BUILDFLAGS = 1
+include /usr/share/dpkg/buildflags.mk
+
+DEB_HOST_GNU_TYPE := $(shell dpkg-architecture -qDEB_HOST_GNU_TYPE)
+
+
+# Files to delete from the source archive to be in accordance with the Debian free software guidelines
+DFSG_FILESTOCLEAN = ike/docs/*
+
+VERSION:=$(shell dpkg-parsechangelog | grep '^Version' | sed 's/Version: //' | sed -e 's/+[^+]*$$//')
+URL = http://www.shrew.net/download/ike/ike-$(VERSION)-release.tgz
+
+get-orig-source:
+	wget -O ike.tar.gz "$(URL)"
+	tar zxvf ike.tar.gz
+	$(RM) $(DFSG_FILESTOCLEAN)
+	mkdir tmp
+	mv ike tmp/ike-$(VERSION)+dfsg
+	cd tmp && tar cvf ike_$(VERSION)+dfsg.orig.tar ike-$(VERSION)+dfsg
+	cd tmp && gzip -9 ike_$(VERSION)+dfsg.orig.tar
+	mv tmp/ike_$(VERSION)+dfsg.orig.tar.gz .
+	$(RM) -R tmp
+	$(RM) ike.tar.gz
+
+
+%:
+	dh $@ --parallel
+
+override_dh_auto_configure:
+	dh_auto_configure -- -DQTGUI=YES -DNATT=YES -DCMAKE_INSTALL_PREFIX:PATH=/usr -DETCDIR:PATH=/etc -DMANDIR:PATH=/usr/share/man -DLIBDIR=/usr/lib/$(DEB_HOST_GNU_TYPE)/ike -DCMAKE_INSTALL_RPATH:UNINITIALIZED=/usr/lib/$(DEB_HOST_GNU_TYPE)/ike -DDEBUG=YES
+
+
+override_dh_auto_install:
+	dh_auto_install
+	mv debian/tmp/etc/iked.conf.sample debian/tmp/etc/iked.conf
+
+override_dh_installchangelogs:
+	dh_installchangelogs TODO.TXT
+
+override_dh_installinit:
+	dh_installinit -p ike --error-handler=ike_error
+
+override_dh_makeshlibs:
+	dh_makeshlibs -n
+
+override_dh_shlibdeps:
+	dh_shlibdeps -l/usr/lib/ike
+

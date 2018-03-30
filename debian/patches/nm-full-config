@@ -1,0 +1,168 @@
+Description: Full NetworkManager Config.
+ This moves all of the configuration of the IP on the interface to
+ NetworkManager, at least in theory.
+ .
+ This is because of a change in NetworkManager that prevents things from
+ working properly if we declare that we are using tap0 and response traffic
+ arrives on eth0 or wlan0 instead.
+Author: Zephaniah E. Loss-Cutler-Hull <zhull@jetpay.com>
+
+---
+The information above should follow the Patch Tagging Guidelines, please
+checkout http://dep.debian.net/deps/dep3/ to learn about the format. Here
+are templates for supplementary fields that you might want to add:
+
+Origin: <vendor|upstream|other>, <url of original patch>
+Bug: <url in upstream bugtracker>
+Bug-Debian: https://bugs.debian.org/<bugnumber>
+Bug-Ubuntu: https://launchpad.net/bugs/<bugnumber>
+Forwarded: <no|not-needed|url proving that it has been forwarded>
+Reviewed-By: <name and email of someone who approved the patch>
+Last-Update: <YYYY-MM-DD>
+
+--- ike-2.2.1+dfsg.orig/source/iked/ike.h
++++ ike-2.2.1+dfsg/source/iked/ike.h
+@@ -517,6 +517,7 @@
+ 
+ #define IP_CONF_OPTS_CLIENT			0x0001
+ #define IP_CONF_OPTS_CLIENT_ROUTE	0x0002
++#define IP_CONF_OPTS_CLIENT_FULL	0x0004
+ 
+ #define CONFIG_MODE_NONE		0
+ #define CONFIG_MODE_PULL		1
+--- ike-2.2.1+dfsg.orig/source/iked/ike.io.admin.cpp
++++ ike-2.2.1+dfsg/source/iked/ike.io.admin.cpp
+@@ -744,8 +744,10 @@ long _IKED::loop_ipc_client( IKEI * ikei
+ 				// setup client network parameters
+ 				//
+ 
+-				if( !client_net_config( tunnel ) )
+-					break;
++				if (!(tunnel->xconf.flags & IP_CONF_OPTS_CLIENT_FULL)) {
++					if( !client_net_config( tunnel ) )
++						break;
++				}
+ 				if (tunnel->xconf.flags & IP_CONF_OPTS_CLIENT) {
+ 					long int resp = 0;
+ 					if (tunnel->adapter) {
+--- ike-2.2.1+dfsg.orig/source/nm-ikec/ikec.cpp
++++ ike-2.2.1+dfsg/source/nm-ikec/ikec.cpp
+@@ -1018,8 +1018,18 @@ long _IKEC_NM::func( void * )
+ 		xconf.vmtu = 1500;
+ 		if ((text = nm_setting_vpn_get_data_item (s_vpn, "network-mtu-size")) && (numb = atoi(text)))
+ 			xconf.vmtu = numb;
++	} else if (!strcmp ("none", text)) {
++		xconf.iface[0] = '\0';
++		strncpy (xconf.iface, text, sizeof (xconf.iface));
++
++		xconf.opts |= ( IPSEC_OPTS_ADDR | IPSEC_OPTS_MASK );
++		xconf.rqst |= ( IPSEC_OPTS_ADDR | IPSEC_OPTS_MASK );
++		xconf.flags |= IP_CONF_OPTS_CLIENT_FULL;
++
++		peer.plcy_mode = POLICY_MODE_CONFIG;
+ 	}
+ 
++
+ 	// enable wins options
+ 
+ 	if ((text = nm_setting_vpn_get_data_item (s_vpn, "client-wins-enable")))
+@@ -1238,7 +1248,7 @@ long _IKEC_NM::func( void * )
+ 	//
+ 
+ 	//xconf.flags = IP_CONF_OPTS_CLIENT | IP_CONF_OPTS_CLIENT_ROUTE | IP_CONF_OPTS_NO_TUN;
+-	xconf.flags = IP_CONF_OPTS_CLIENT | IP_CONF_OPTS_CLIENT_ROUTE;
++	xconf.flags |= IP_CONF_OPTS_CLIENT | IP_CONF_OPTS_CLIENT_ROUTE;
+ 	msg.set_client( &xconf );
+ 	result = ikei.send_message( msg, &msgres );
+ 
+@@ -1667,15 +1677,18 @@ long _IKEC_NM::func( void * )
+ 				}
+ 
+ 				// XXX: FIXME: We need to have actual logic here.
+-				if (!strcmp(xconf.iface, "default")) {
+-					val = str_to_gvalue ("eth0.0", FALSE);
+-				} else {
+-					val = str_to_gvalue (xconf.iface, FALSE);
++
++				if (!(xconf.flags & IP_CONF_OPTS_CLIENT_FULL)) {
++					if (!strcmp(xconf.iface, "default")) {
++						val = str_to_gvalue ("eth0.0", FALSE);
++					} else {
++						val = str_to_gvalue (xconf.iface, FALSE);
++					}
++					if (val)
++						g_hash_table_insert (config, (void *) NM_VPN_PLUGIN_IP4_CONFIG_TUNDEV, val);
++					else
++						goto IKEI_MSGID_CLIENT_err;
+ 				}
+-				if (val)
+-					g_hash_table_insert (config, (void *) NM_VPN_PLUGIN_IP4_CONFIG_TUNDEV, val);
+-				else
+-					goto IKEI_MSGID_CLIENT_err;
+ 
+ 				val = uint_to_gvalue(xconf.addr.s_addr);
+ 				if (val) {
+--- ike-2.2.1+dfsg.orig/source/nm-ikec/nm-ikec-props.ui
++++ ike-2.2.1+dfsg/source/nm-ikec/nm-ikec-props.ui
+@@ -20,6 +20,24 @@
+       </row>
+     </data>
+   </object>
++  <object class="GtkListStore" id="client-iface-store">
++    <columns>
++      <!-- column-name display -->
++      <column type="gchararray"/>
++      <!-- column-name value -->
++      <column type="gchararray"/>
++    </columns>
++    <data>
++      <row>
++        <col id="0" translatable="yes">Virtual (tap)</col>
++        <col id="1" translatable="yes">virtual</col>
++      </row>
++      <row>
++        <col id="0" translatable="yes">None (main interface)</col>
++        <col id="1" translatable="yes">none</col>
++      </row>
++    </data>
++  </object>
+   <object class="GtkListStore" id="network_frag_mode_list">
+     <columns>
+       <!-- column-name gchararray1 -->
+@@ -217,6 +235,36 @@
+                     <property name="top_attach">2</property>
+                   </packing>
+                 </child>
++                <child>
++                  <object class="GtkLabel" id="label16">
++                    <property name="visible">True</property>
++                    <property name="can_focus">False</property>
++                    <property name="label" translatable="yes">Interface</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">0</property>
++                    <property name="top_attach">3</property>
++                  </packing>
++                </child>
++                <child>
++                  <object class="GtkComboBox" id="client-iface">
++                    <property name="visible">True</property>
++                    <property name="can_focus">False</property>
++                    <property name="model">client-iface-store</property>
++                    <property name="has_entry">True</property>
++                    <property name="entry_text_column">0</property>
++                    <property name="id_column">1</property>
++                    <child internal-child="entry">
++                      <object class="GtkEntry" id="combobox-entry7">
++                        <property name="can_focus">False</property>
++                      </object>
++                    </child>
++                  </object>
++                  <packing>
++                    <property name="left_attach">1</property>
++                    <property name="top_attach">3</property>
++                  </packing>
++                </child>
+               </object>
+             </child>
+           </object>

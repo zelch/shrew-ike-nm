@@ -1,0 +1,6 @@
+debian/tmp/etc/dbus-1/system.d/nm-ikec-service.conf etc/dbus-1/system.d/
+debian/tmp/etc/NetworkManager/VPN/nm-ikec-service.name etc/NetworkManager/VPN/
+debian/tmp/usr/bin/nm-ikec usr/bin/
+debian/tmp/usr/lib/x86_64-linux-gnu/ike/NetworkManager/nm-ikec-auth-dialog usr/lib/NetworkManager/
+debian/tmp/usr/lib/x86_64-linux-gnu/ike/NetworkManager/*.so* usr/lib/x86_64-linux-gnu/NetworkManager/
+debian/tmp/usr/share/gnome-vpn-properties/ikec/nm-ikec-props.ui /usr/share/gnome-vpn-properties/ikec/

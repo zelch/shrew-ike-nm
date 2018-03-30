@@ -1,0 +1,11 @@
+#!/bin/sh
+# See /usr/share/debhelper/dh_make/debian/postrm.ex
+set -e
+
+ike_error() {
+	echo $?
+}
+
+#DEBHELPER#
+
+exit 0

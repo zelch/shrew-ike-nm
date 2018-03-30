@@ -1,0 +1,5061 @@
+Description: JetPay specific changes for intergration of ike with NetworkManager under GTK.
+ JetPay specific changes for intergration of ike with NetworkManager under GTK.
+---
+The information above should follow the Patch Tagging Guidelines, please
+checkout http://dep.debian.net/deps/dep3/ to learn about the format. Here
+are templates for supplementary fields that you might want to add:
+
+Origin: JetPay
+Reviewed-By: Zephaniah E. Loss-Cutler-Hull <zhull@jetpay.com>
+Last-Update: <2014-03-15>
+
+--- ike-2.2.1+dfsg.orig/CMakeLists.txt
++++ ike-2.2.1+dfsg/CMakeLists.txt
+@@ -32,6 +32,7 @@ set(
+ subdirs(
+ 	source/iked
+ 	source/ikec
++	source/nm-ikec
+ 	source/libike
+ 	source/libip
+ 	source/libidb
+--- ike-2.2.1+dfsg.orig/source/iked/ike.h
++++ ike-2.2.1+dfsg/source/iked/ike.h
+@@ -515,6 +515,9 @@
+ #define IPSEC_DNSS_MAX			8
+ #define IPSEC_NBNS_MAX			4
+ 
++#define IP_CONF_OPTS_CLIENT			0x0001
++#define IP_CONF_OPTS_CLIENT_ROUTE	0x0002
++
+ #define CONFIG_MODE_NONE		0
+ #define CONFIG_MODE_PULL		1
+ #define CONFIG_MODE_PUSH		2
+@@ -674,7 +677,9 @@ typedef struct _IKE_XCONF
+ {
+ 	long		opts;		// enabled options
+ 	long		rqst;		// request options
++	long		flags;		// IKE client configuration flags.
+ 
++	char		iface[8];	// network interface
+ 	in_addr		addr;		// network address
+ 	in_addr		mask;		// network mask
+ 	in_addr		dhcp;		// dhcp servers
+--- ike-2.2.1+dfsg.orig/source/iked/ike.io.admin.cpp
++++ ike-2.2.1+dfsg/source/iked/ike.io.admin.cpp
+@@ -746,6 +746,14 @@ long _IKED::loop_ipc_client( IKEI * ikei
+ 
+ 				if( !client_net_config( tunnel ) )
+ 					break;
++				if (tunnel->xconf.flags & IP_CONF_OPTS_CLIENT) {
++					long int resp = 0;
++					if (tunnel->adapter) {
++						strncpy (tunnel->xconf.iface, tunnel->adapter->name, sizeof (tunnel->xconf.iface));
++					}
++					msg.set_client( &tunnel->xconf );
++					ikei->send_message( msg, &resp );
++				}
+ 
+ 				msg.set_status( STATUS_INFO, "network device configured\n" );
+ 				ikei->send_message( msg );
+@@ -760,7 +768,9 @@ long _IKED::loop_ipc_client( IKEI * ikei
+ 				// setup client dns parameters
+ 				//
+ 
+-				client_dns_config( tunnel );
++				if (!(tunnel->xconf.flags & IP_CONF_OPTS_CLIENT)) {
++					client_dns_config( tunnel );
++				}
+ 
+ 				//
+ 				// tunnel is enabled
+@@ -802,7 +812,9 @@ long _IKED::loop_ipc_client( IKEI * ikei
+ 		// revert client network parameters
+ 		//
+ 
+-		client_dns_revert( tunnel );
++		if (!(tunnel->xconf.flags & IP_CONF_OPTS_CLIENT)) {
++			client_dns_revert( tunnel );
++		}
+ 
+ 		//
+ 		// cleanup client settings
+--- ike-2.2.1+dfsg.orig/source/iked/ike.policy.cpp
++++ ike-2.2.1+dfsg/source/iked/ike.policy.cpp
+@@ -535,6 +535,7 @@ bool _IKED::policy_create( IDB_TUNNEL *
+ {
+ 	char txtid_src[ LIBIKE_MAX_TEXTP2ID ];
+ 	char txtid_dst[ LIBIKE_MAX_TEXTP2ID ];
++	IKEI_MSG msg;
+ 
+ 	//
+ 	// define inbound policy
+@@ -678,12 +679,21 @@ bool _IKED::policy_create( IDB_TUNNEL *
+ 				if( id2.type == ISAKMP_ID_IPV4_ADDR )
+ 					route_entry.mask.s_addr = 0xffffffff;
+ 
+-				iproute.increment(
+-					route_entry.addr,
+-					route_entry.mask );
++				if (tunnel->xconf.flags & IP_CONF_OPTS_CLIENT_ROUTE) {
++					long result = 0;
++					msg.set_route( 0, &route_entry );
++					tunnel->ikei->send_message( msg, &result );
++					if (result == IKEI_RESULT_OK) {
++						policy->flags |= PFLAG_ROUTED;
++					}
++				} else {
++					iproute.increment(
++						route_entry.addr,
++						route_entry.mask );
+ 
+-				if( iproute.add( route_entry ) )
+-					policy->flags |= PFLAG_ROUTED;
++					if( iproute.add( route_entry ) )
++						policy->flags |= PFLAG_ROUTED;
++				}
+ 
+ 				break;
+ 			}
+@@ -700,8 +710,17 @@ bool _IKED::policy_create( IDB_TUNNEL *
+ 					if( id2.type == ISAKMP_ID_IPV4_ADDR )
+ 						route_entry.mask.s_addr = 0xffffffff;
+ 
+-					if( iproute.add( route_entry ) )
+-						policy->flags |= PFLAG_ROUTED;
++					if (tunnel->xconf.flags & IP_CONF_OPTS_CLIENT_ROUTE) {
++						long result = 0;
++						msg.set_route( 1, &route_entry );
++						tunnel->ikei->send_message( msg, &result );
++						if (result == IKEI_RESULT_OK) {
++							policy->flags |= PFLAG_ROUTED;
++						}
++					} else {
++						if( iproute.add( route_entry ) )
++							policy->flags |= PFLAG_ROUTED;
++					}
+ 				}
+ 
+ 				break;
+--- ike-2.2.1+dfsg.orig/source/libike/libike.cpp
++++ ike-2.2.1+dfsg/source/libike/libike.cpp
+@@ -215,6 +215,17 @@ long _IKEI_MSG::set_client( IKE_XCONF *
+ 	return set_struct( 0, xconf, sizeof( IKE_XCONF ) );
+ }
+ 
++long _IKEI_MSG::get_route( long * type, IPROUTE_ENTRY * route_entry )
++{
++	return get_struct( type, route_entry, sizeof( IPROUTE_ENTRY ) );
++}
++
++long _IKEI_MSG::set_route( long type, IPROUTE_ENTRY * route_entry )
++{
++	init( IKEI_MSGID_ROUTE );
++	return set_struct( type, route_entry, sizeof( IPROUTE_ENTRY ) );
++}
++
+ long _IKEI_MSG::get_network( long * type, IKE_PH2ID * ph2id )
+ {
+ 	return get_struct( type, ph2id, sizeof( IKE_PH2ID ) );
+--- ike-2.2.1+dfsg.orig/source/libike/libike.h
++++ ike-2.2.1+dfsg/source/libike/libike.h
+@@ -64,6 +64,7 @@
+ #include <assert.h>
+ #include <string.h>
+ #include <time.h>
++#include "libip.h"
+ #include "libidb.h"
+ #include "libith.h"
+ #include "ike.h"
+@@ -85,6 +86,7 @@
+ #define IKEI_MSGID_NETWORK			8
+ #define IKEI_MSGID_CFGSTR			9
+ #define IKEI_MSGID_STATS			10
++#define IKEI_MSGID_ROUTE			11
+ 
+ #define IKEI_RESULT_OK				0
+ #define IKEI_RESULT_FAILED			1
+@@ -181,6 +183,8 @@ typedef class DLX _IKEI_MSG : public BDA
+ 
+ 	long	get_network( long * type, IKE_PH2ID * ph2id );
+ 	long	set_network( long type, IKE_PH2ID * ph2id );
++	long	get_route( long * type, IPROUTE_ENTRY * route_entry );
++	long	set_route( long type, IPROUTE_ENTRY * route_entry );
+ 
+ 	long	get_cfgstr( long * type, BDATA * str );
+ 	long	set_cfgstr( long type, BDATA * str );
+--- /dev/null
++++ ike-2.2.1+dfsg/source/nm-ikec/CMakeLists.txt
+@@ -0,0 +1,124 @@
++#
++# Shrew Soft VPN / Client Connect Application
++# Cross Platform Make File
++#
++# author : Matthew Grooms
++#        : mgrooms@shrew.net
++#        : Copyright 2007, Shrew Soft Inc
++#
++
++cmake_minimum_required( VERSION 2.4 )
++if( COMMAND cmake_policy )
++	cmake_policy( SET CMP0003 NEW )
++endif( COMMAND cmake_policy )
++
++include ( FindPkgConfig )
++include_directories(
++	${IKE_SOURCE_DIR}/source/
++	${IKE_SOURCE_DIR}/source/ikea
++	${IKE_SOURCE_DIR}/source/iked
++	${IKE_SOURCE_DIR}/source/libike
++	${IKE_SOURCE_DIR}/source/libidb
++	${IKE_SOURCE_DIR}/source/libith
++	${IKE_SOURCE_DIR}/source/liblog
++	${IKE_SOURCE_DIR}/source/libip
++	${QT_INCLUDES} )
++
++link_directories(
++	${IKE_SOURCE_DIR}/source/libip )
++
++add_executable(
++	nm-ikec
++	config.cpp
++	ikec.cpp
++	)
++
++add_library(
++	nm-ikec-properties SHARED
++	nm-ikec-props.cpp
++	config.cpp
++	)
++
++pkg_search_module ("GTK", 1, "gtk+-3.0")
++if (GTK_FOUND)
++	if (GTK_CFLAGS)
++		ADD_DEFINITIONS (${GTK_CFLAGS})
++	endif (GTK_CFLAGS)
++endif (GTK_FOUND)
++
++pkg_search_module ("NM_GLIB", 1, "libnm-glib")
++if (NM_GLIB_FOUND)
++	if (NM_GLIB_CFLAGS)
++		ADD_DEFINITIONS (${NM_GLIB_CFLAGS})
++	endif (NM_GLIB_CFLAGS)
++endif (NM_GLIB_FOUND)
++
++pkg_search_module ("NM_UTIL", 1, "libnm-util")
++if (NM_UTIL_FOUND)
++	if (NM_UTIL_CFLAGS)
++		ADD_DEFINITIONS (${NM_UTIL_CFLAGS})
++	endif (NM_UTIL_CFLAGS)
++endif (NM_UTIL_FOUND)
++
++pkg_search_module ("NM_GLIB_VPN", 1, "libnm-glib-vpn")
++if (NM_GLIB_VPN_FOUND)
++	if (NM_GLIB_VPN_CFLAGS)
++		ADD_DEFINITIONS (${NM_GLIB_VPN_CFLAGS})
++	endif (NM_GLIB_VPN_CFLAGS)
++endif (NM_GLIB_VPN_FOUND)
++
++target_link_libraries(
++	nm-ikec-properties
++	ss_ike
++	ss_idb
++	ss_ith
++	ss_log
++	${NM_GLIB_VPN_LIBRARIES}
++	${GTK_LIBRARIES}
++	)
++
++target_link_libraries(
++	nm-ikec
++	ss_ike
++	ss_idb
++	ss_ith
++	ss_log
++	ss_ip
++	crypto
++	pthread
++	edit
++	${NM_GLIB_LIBRARIES}
++	${NM_GLIB_VPN_LIBRARIES}
++	${NM_UTIL_LIBRARIES}
++	)
++
++ADD_DEFINITIONS (-Wall)
++
++# install support
++
++install(
++	TARGETS nm-ikec
++	RUNTIME	DESTINATION bin
++	PERMISSIONS OWNER_EXECUTE OWNER_WRITE OWNER_READ GROUP_EXECUTE GROUP_READ WORLD_READ WORLD_EXECUTE )
++
++install(
++	TARGETS nm-ikec-properties
++	LIBRARY	DESTINATION ${PATH_LIB}/NetworkManager/
++	PERMISSIONS OWNER_EXECUTE OWNER_WRITE OWNER_READ GROUP_EXECUTE GROUP_READ WORLD_READ WORLD_EXECUTE )
++
++install(
++	FILES nm-ikec-service.conf
++	DESTINATION ${PATH_ETC}/dbus-1/system.d/ )
++
++install(
++	FILES nm-ikec-service.name
++	DESTINATION ${PATH_ETC}/NetworkManager/VPN/ )
++
++install(
++	FILES nm-ikec-auth-dialog
++	DESTINATION ${PATH_LIB}/NetworkManager/
++	PERMISSIONS OWNER_EXECUTE OWNER_WRITE OWNER_READ GROUP_EXECUTE GROUP_READ WORLD_READ WORLD_EXECUTE )
++
++install(
++	FILES nm-ikec-props.ui
++	DESTINATION /usr/share/gnome-vpn-properties/ikec/ )
+--- /dev/null
++++ ike-2.2.1+dfsg/source/nm-ikec/config.cpp
+@@ -0,0 +1,887 @@
++
++/*
++ * Copyright (c) 2007
++ *      Shrew Soft Inc.  All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Redistributions in any form must be accompanied by information on
++ *    how to obtain complete source code for the software and any
++ *    accompanying software that uses the software.  The source code
++ *    must either be included in the distribution or be available for no
++ *    more than the cost of distribution plus a nominal fee, and must be
++ *    freely redistributable under reasonable conditions.  For an
++ *    executable file, complete source code means the source code for all
++ *    modules it contains.  It does not include source code for modules or
++ *    files that typically accompany the major components of the operating
++ *    system on which the executable file runs.
++ *
++ * THIS SOFTWARE IS PROVIDED BY SHREW SOFT INC ``AS IS'' AND ANY EXPRESS
++ * OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
++ * WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, OR
++ * NON-INFRINGEMENT, ARE DISCLAIMED.  IN NO EVENT SHALL SHREW SOFT INC
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ *
++ * AUTHOR : Matthew Grooms
++ *          mgrooms@shrew.net
++ *
++ */
++
++#include "config.h"
++#include "openssl/rand.h"
++#include "openssl/hmac.h"
++#include "openssl/sha.h"
++
++//==============================================================================
++// helper functions
++//
++
++#define DELIM_NEW	','
++#define DELIM_OLD	0x255
++
++inline char * text_delim( char * text )
++{
++	char * delim;
++
++	delim = strchr( text, DELIM_NEW );
++	if( delim == NULL )
++		delim = strchr( text, DELIM_OLD );
++
++	return delim;
++}
++
++inline size_t text_length( char * text )
++{
++	size_t oset = 0;
++
++	while( true )
++	{
++		int c = text[ oset ];
++
++		switch( c )
++		{
++			case 0:
++			case DELIM_OLD:
++			case DELIM_NEW:
++				return oset;
++
++			default:
++				oset++;
++		}
++	}
++
++	return 0;
++}
++
++//==============================================================================
++// configuration classes
++//
++
++_CFGDAT::_CFGDAT()
++{
++	nval = 0;
++}
++
++_CONFIG::_CONFIG()
++{
++}
++
++_CONFIG::~_CONFIG()
++{
++}
++
++bool _CONFIG::set_id( const char * set_id )
++{
++	id.del();
++	id.set( set_id, strlen( set_id ) + 1 );
++	return true;
++}
++
++const char * _CONFIG::get_id()
++{
++	return id.text();
++}
++
++_CONFIG & _CONFIG::operator = ( _CONFIG & config )
++{
++	del_all();
++	set_id( config.get_id() );
++
++	for( long index = 0; index < config.count(); index++ )
++	{
++		CFGDAT * cfgdat = static_cast<CFGDAT*>( config.get_entry( index ) );
++		switch( cfgdat->type )
++		{
++			case DATA_STRING:
++				set_string( cfgdat->key.text(), cfgdat->vval.text(), cfgdat->vval.size() );
++				break;
++
++			case DATA_NUMBER:
++				set_number( cfgdat->key.text(), cfgdat->nval );
++				break;
++
++			case DATA_BINARY:
++				set_binary( cfgdat->key.text(), cfgdat->vval );
++				break;
++		}
++	}
++	
++	return *this;
++}
++
++CFGDAT * _CONFIG::get_data( long type, const char * key, bool add )
++{
++	CFGDAT * cfgdat;
++
++	for( long index = 0; index < count(); index++ )
++	{
++		cfgdat = static_cast<CFGDAT*>( get_entry( index ) );
++
++		if( cfgdat->type != type )
++			continue;
++		
++		if( !strcasecmp( cfgdat->key.text(), key ) )
++			return cfgdat;
++	}
++
++	if( add )
++	{
++		cfgdat = new CFGDAT;
++		if( cfgdat == NULL )
++			return NULL;
++
++		cfgdat->type = type;
++		cfgdat->key.set( key, strlen( key ) + 1 );
++		add_entry( cfgdat );
++
++		return cfgdat;
++	}
++
++	return NULL;
++}
++
++void _CONFIG::del( const char * key )
++{
++	CFGDAT * cfgdat;
++
++	for( long index = 0; index < count(); index++ )
++	{
++		cfgdat = static_cast<CFGDAT*>( get_entry( index ) );
++
++		if( !strcasecmp( cfgdat->key.text(), key ) )
++		{
++			del_entry( cfgdat );
++			delete cfgdat;
++		}
++	}
++}
++
++void _CONFIG::del_all()
++{
++	clean();
++}
++
++bool _CONFIG::add_string( const char * key, const char * val, size_t size )
++{
++	CFGDAT * cfgdat = get_data( DATA_STRING, key, true );
++	if( !cfgdat )
++		return false;
++
++	if( cfgdat->vval.size() )
++	{
++		cfgdat->vval.set( ",", 1, cfgdat->vval.size() - 1 );
++		cfgdat->vval.add( val, size );
++		cfgdat->vval.add( "", 1 );
++	}
++	else
++	{
++		cfgdat->vval.add( val, size );
++		cfgdat->vval.add( "", 1 );
++	}
++
++	return true;
++}
++
++bool _CONFIG::set_string( const char * key, const char * val, size_t size )
++{
++	del( key );
++	add_string( key, val, size );
++
++	return true;
++}
++
++bool _CONFIG::get_string( const char * key, char * val, size_t size, int index )
++{
++	CFGDAT * cfgdat = get_data( DATA_STRING, key );
++	if( !cfgdat )
++		return false;
++
++	char * strptr = cfgdat->vval.text();
++
++	for( ; index > 0; index-- )
++	{
++		char * tmpptr = text_delim( strptr );
++		if( tmpptr == NULL )
++			return false;
++
++		strptr = tmpptr + 1;
++	}
++
++	// calculate final length
++
++	size--;
++
++	size_t clen = text_length( strptr );
++	if( clen < size )
++		size = clen;
++
++	memcpy( val, strptr, size );
++	val[ size ] = 0;
++
++	return true;
++}
++
++bool _CONFIG::get_string( const char * key, BDATA & val, int index )
++{
++	CFGDAT * cfgdat = get_data( DATA_STRING, key );
++	if( !cfgdat )
++		return false;
++
++	char * strptr = cfgdat->vval.text();
++
++	for( ; index > 0; index-- )
++	{
++		char * tmpptr = text_delim( strptr );
++		if( tmpptr == NULL )
++			return false;
++
++		strptr = tmpptr + 1;
++	}
++
++	// calculate final length
++
++	size_t clen = text_length( strptr );
++
++	val.del();
++	val.set( strptr, clen );
++
++	return true;
++}
++
++long _CONFIG::has_string( const char * key, const char * val, size_t size )
++{
++	CFGDAT * cfgdat = get_data( DATA_STRING, key );
++	if( !cfgdat )
++		return -1;
++
++	char * oldptr = cfgdat->vval.text();
++	char * newptr = cfgdat->vval.text();
++
++	long index = 0;
++
++	while( newptr )
++	{
++		newptr = text_delim( oldptr );
++
++		if( newptr )
++		{
++			size_t diff = newptr - oldptr;
++			if( diff < size )
++				size = diff;
++		}
++
++		if( !strncmp( val, oldptr, size ) )
++			return index;
++		
++		oldptr = newptr + 1;
++		index++;
++	}
++
++	return -1;
++}
++
++bool _CONFIG::set_number( const char * key, long val )
++{
++	CFGDAT * cfgdat = get_data( DATA_NUMBER, key, true );
++	if( !cfgdat )
++		return false;
++
++	cfgdat->nval = val;
++
++	return true;
++}
++
++bool _CONFIG::get_number( const char * key, long * val )
++{
++	CFGDAT * cfgdat = get_data( DATA_NUMBER, key );
++	if( !cfgdat )
++		return false;
++
++	*val = cfgdat->nval;
++
++	return true;
++}
++
++bool _CONFIG::set_binary( const char * key, BDATA & val )
++{
++	CFGDAT * cfgdat = get_data( DATA_BINARY, key, true );
++	if( !cfgdat )
++		return false;
++
++	cfgdat->vval = val;
++
++	return true;
++}
++
++bool _CONFIG::get_binary( const char * key, BDATA & val )
++{
++	CFGDAT * cfgdat = get_data( DATA_BINARY, key );
++	if( !cfgdat )
++		return false;
++
++	val = cfgdat->vval;
++
++	return true;
++}
++
++bool _CONFIG::file_write( const char * path )
++{
++	FILE * fp = fopen( path, "w" );
++	if( fp == NULL )
++		return false;
++
++	for( long index = 0; index < count(); index++ )
++	{
++		CFGDAT * cfgdat = static_cast<CFGDAT*>( get_entry( index ) );
++		switch( cfgdat->type )
++		{
++			case DATA_STRING:
++				fprintf( fp, "s:%s:%s\n", cfgdat->key.text(), cfgdat->vval.text() );
++				break;
++
++			case DATA_NUMBER:
++				fprintf( fp, "n:%s:%li\n", cfgdat->key.text(), cfgdat->nval );
++				break;
++
++			case DATA_BINARY:
++			{
++				BDATA b64;
++				b64 = cfgdat->vval;
++				b64.base64_encode();
++				fprintf( fp, "b:%s:%s\n", cfgdat->key.text(), b64.text() );
++				break;
++			}
++		}
++	}
++
++	fclose( fp );
++
++	return true;
++}
++
++bool _CONFIG::file_read( const char * path )
++{
++	FILE * fp = fopen( path, "r" );
++	if( fp == NULL )
++		return false;
++
++	long line = 0;
++
++	while( true )
++	{
++		int	next = 0;
++		int	type;
++		BDATA	name;
++		BDATA	data;
++
++		//
++		// get value type
++		//
++
++		type = fgetc( fp );
++
++		if( ( type == ' ' ) ||
++			( type == '\t' ) ||
++			( type == '\r' ) ||
++			( type == '\n' ) )
++			continue;
++
++		if( type == EOF )
++			break;
++
++		//
++		// get delim
++		//
++
++		if( fgetc( fp ) != ':' )
++		{
++			printf( "invalid delimiter \'%c\' between type and name ( line %li )\n",
++				next, line );
++			goto parse_fail;
++		}
++
++		//
++		// get value name
++		//
++
++		while( true )
++		{
++			next = fgetc( fp );
++
++			if( ( next == ':' ) ||
++				( next == '\n' ) ||
++				( next == EOF ) )
++				break;
++
++			name.add( next, 1 );
++		}
++
++		if( !name.size() )
++			goto parse_fail;
++
++		name.add( "", 1 );
++
++		//
++		// check delim
++		//
++
++		if( next != ':' )
++		{
++			printf( "invalid delimiter \'%c\' between name and value ( line %li )\n",
++				next, line );
++			goto parse_fail;
++		}
++
++		//
++		// get value data
++		//
++
++		while( true )
++		{
++			next = fgetc( fp );
++
++			if( next == '\r' )
++				continue;
++
++			if( ( next == '\n' ) ||
++				( next == EOF ) )
++				break;
++
++			data.add( next, 1 );
++		}
++
++		data.add( "", 1 );
++
++		switch( type )
++		{
++			case 's':
++			{
++//				printf( "string attribute %s read ( %i bytes )\n",
++//					name.text(),
++//					data.size() );
++
++				add_string( name.text(), data.text(), data.size() );
++				break;
++			}
++
++			case 'n':
++			{
++//				printf( "number attribute %s read ( %i bytes )\n",
++//					name.text(),
++//					data.size() );
++
++				set_number( name.text(), atol( data.text() ) );
++				break;
++			}
++
++			case 'b':
++			{
++//				printf( "binary attribute %s read ( %i bytes )\n",
++//					name.text(),
++//					data.size() );
++
++				BDATA b64;
++				b64 = data;
++				b64.base64_decode();
++				set_binary( name.text(), b64 );
++				break;
++			}
++
++			default:
++				printf( "invalid value type \'%c\' ( line %li )\n",
++					type, line );
++				goto parse_fail;
++		}
++
++		line++;
++	}
++
++	fclose( fp );
++
++	return true;
++
++	parse_fail:
++
++	printf( "parse error in line %li\n", line );
++
++	fclose( fp );
++
++	return false;
++}
++
++bool read_line_pcf( FILE * fp, BDATA & name, BDATA & data )
++{
++	char	next;
++	BDATA	line;
++
++	name.del();
++	data.del();
++
++	//
++	// read the next line
++	//
++
++	while( true )
++	{
++		next = fgetc( fp );
++
++		if( next == '\r' )
++			continue;
++
++		if( next == '\n' )
++			break;
++
++		if( next == EOF )
++			break;
++
++		line.add( next, 1 );
++	}
++
++	//
++	// check for valid line
++	//
++
++	if( !line.size() )
++	{
++		if( next == EOF )
++			return false;
++		else
++		{
++			name.add( "", 1 );
++			data.add( "", 1 );
++			return true;
++		}
++	}
++
++	//
++	// read the name value
++	//
++
++	while( line.get( &next, 1 ) )
++	{
++		if( !name.size() )
++			if( ( next == ' ' ) || ( next == '!' ) )
++				continue;
++
++		if( next == '=' )
++			break;
++
++		name.add( next, 1 );
++	}
++
++	//
++	// verify the delimiter
++	//
++
++	if( next != '=' )
++		return true;
++
++	//
++	// read the data value
++	//
++
++	while( line.get( &next, 1 ) )
++	{
++		if( !data.size() )
++			if( next == ' ' )
++				continue;
++
++		data.add( next, 1 );
++	}
++
++	//
++	// trim the values
++	//
++
++	if( name.size() )
++		while( name.buff()[ name.size() - 1 ] == ' ' )
++			name.size( name.size() -1 );
++
++	if( data.size() )
++		while( data.buff()[ data.size() - 1 ] == ' ' )
++			data.size( data.size() -1 );
++
++	//
++	// null terminate values
++	//
++
++	name.add( "", 1 );
++	data.add( "", 1 );
++
++	return true;
++}
++
++bool _CONFIG::file_import_pcf( const char * path, bool & need_certs )
++{
++	FILE * fp = fopen( path, "r" );
++	if( fp == NULL )
++		return false;
++
++	//
++	// set some sane defaults
++	//
++
++	set_number( "version", 3 );
++	set_number( "network-ike-port", 500 );
++	set_number( "network-mtu-size", 1380 );
++
++	set_string( "client-auto-mode", "pull", 5 );
++	set_string( "client-iface", "virtual", 8 );
++	set_number( "client-addr-auto", 1 );
++
++	set_string( "network-natt-mode", "enable", 7 );
++	set_number( "network-natt-port", 4500 );
++	set_number( "network-natt-rate", 15 );
++
++	set_string( "network-frag-mode", "disable", 8 );
++	set_number( "network-frag-size", 540 );
++
++	set_number( "network-dpd-enable", 1 );
++	set_number( "network-notify-enable", 1 );
++	set_number( "client-banner-enable", 1 );
++
++	set_string( "auth-method", "mutual-psk-xauth", 17 );
++	set_string( "ident-server-type", "any", 4 );
++
++	set_string( "phase1-exchange", "aggressive", 11 );
++	set_string( "phase1-cipher", "auto", 5 );
++	set_string( "phase1-hash", "auto", 5 );
++	set_number( "phase1-dhgroup", 2 );
++	set_number( "phase1-life-secs", 86400 );
++
++	set_string( "phase2-transform", "auto", 5 );
++	set_string( "phase2-hmac", "auto", 5 );
++	set_number( "phase2-pfsgroup", 0 );
++
++	set_string( "ipcomp-transform", "disabled", 9 );
++
++	set_number( "client-dns-used", 1 );
++	set_number( "client-dns-auto", 1 );
++	set_number( "client-dns-suffix-auto", 1 );
++	set_number( "client-splitdns-used", 1 );
++	set_number( "client-splitdns-auto", 1 );
++	set_number( "client-wins-used", 1 );
++	set_number( "client-wins-auto", 1 );
++
++	set_number( "phase2-life-secs", 3600 );
++	set_number( "phase2-life-kbytes", 0 );
++
++	set_number( "policy-nailed", 0 );
++	set_number( "policy-list-auto", 1 );
++
++	//
++	// parse the file contents
++	//
++
++	long auth_type = 1;
++	bool idtype_set = false;
++
++	BDATA	name;
++	BDATA	data;
++
++	while( read_line_pcf( fp, name, data ) )
++	{
++ 		//
++		// Skip invalid name or value lengths
++		//
++
++		if( ( name.size() <= 1 ) || ( data.size() <= 1 ) )
++			continue;
++
++		//
++		// Convert the appropriate values
++		//
++
++		if( !strcasecmp( name.text(), "Host" ) && data.size() )
++			set_string( "network-host", data.text(), data.size() );
++
++		if( !strcasecmp( name.text(), "AuthType" ) && data.size() )
++		{
++			auth_type = atol( data.text() );
++			switch( auth_type )
++			{
++				case 1:
++					set_string( "auth-method", "mutual-psk-xauth", 17 );
++					need_certs = false;
++					break;
++				case 3:
++					set_string( "auth-method", "mutual-rsa-xauth", 17 );
++					need_certs = true;
++					break;
++				case 5:
++					set_string( "auth-method", "hybrid-grp-xauth", 17 );
++					need_certs = true;
++					break;
++				default:
++					goto parse_fail;
++			}
++		}
++
++		if( !strcasecmp( name.text(), "GroupName" ) && data.size() )
++		{
++			set_string( "ident-client-type", "keyid", 6 );
++			set_string( "ident-client-data", data.text(), data.size() );
++		}
++
++		if( !strcasecmp( name.text(), "GroupPwd" ) && data.size() )
++		{
++			idtype_set = true;
++			data.size( data.size() - 1 );
++			if( !data.hex_decode() )
++				goto parse_fail;
++
++			set_binary( "auth-mutual-psk", data );
++		}
++
++		if( !strcasecmp( name.text(), "enc_GroupPwd" ) && data.size() )
++		{
++			data.size( data.size() - 1 );
++			if( !data.hex_decode() )
++				goto parse_fail;
++
++			//
++			// decrypt cisco password
++			//
++
++			if( data.size() < 48 )
++				goto parse_fail;
++
++			unsigned char key[ 40 ];
++			unsigned char one[ 20 ];
++			unsigned char two[ 20 ];
++			
++			data.get( one, 20 );
++			data.get( two, 20 );
++
++			one[ 19 ] += 1;
++
++			SHA_CTX ctx;
++			SHA1_Init( &ctx );
++			SHA1_Update( &ctx, one, 20 );
++			SHA1_Final( key, &ctx );
++
++			one[ 19 ] += 2;
++
++			SHA1_Init( &ctx );
++			SHA1_Update( &ctx, one, 20 );
++			SHA1_Final( key + 20, &ctx );
++
++			size_t pwlen = data.size() - 40;
++
++			SHA1_Init( &ctx );
++			SHA1_Update( &ctx, data.buff() + 40, pwlen );
++			SHA1_Final( one, &ctx );
++
++			if( memcmp( one, two, 20 ) )
++				goto parse_fail;
++
++			BDATA pwd;
++			data.get( pwd );
++
++			EVP_CIPHER_CTX ctx_cipher;
++			EVP_CIPHER_CTX_init( &ctx_cipher );
++
++			EVP_CipherInit_ex(
++				&ctx_cipher,
++				EVP_des_ede3_cbc(),
++				NULL,
++				key,
++				data.buff(),
++				0 );
++
++			EVP_Cipher(
++				&ctx_cipher,
++				pwd.buff(),
++				pwd.buff(),
++				pwd.size() );
++
++			pwlen -= pwd.buff()[ pwd.size() - 1 ];
++			pwd.size( pwlen );
++
++			set_binary( "auth-mutual-psk", pwd );
++		}
++
++		if( !strcasecmp( name.text(), "DHGroup" ) && data.size() )
++		{
++			long dh_group = atol( data.text() );
++			set_number( "phase1-dhgroup", dh_group );
++		}
++
++		if( !strcasecmp( name.text(), "EnableNat" )  && data.size() )
++		{
++			long enable_nat = atol( data.text() );
++			if( enable_nat )
++				set_string( "network-natt-mode", "enable", 7 );
++			else
++				set_string( "network-natt-mode", "disable", 8 );
++		}
++
++		if( !strcasecmp( name.text(), "Username" ) && data.size() )
++			set_string( "client-saved-username", data.text(), data.size() );
++	}
++
++	//
++	// add local identity type for pcf
++	// files without a GroupName line
++	//
++
++	if( !idtype_set )
++	{
++		switch( auth_type )
++		{
++			case 1:	// mutual-psk-xauth
++				set_string( "ident-client-type", "address", 6 );
++				break;
++
++			case 3: // mutual-rsa-xauth
++			case 5: // hybrid-grp-xauth
++				set_string( "ident-client-type", "asn1dn", 6 );
++				break;
++
++			default:
++				goto parse_fail;
++		}
++	}
++
++	fclose( fp );
++
++	return true;
++
++	parse_fail:
++
++	fclose( fp );
++
++	return false;
++}
+--- /dev/null
++++ ike-2.2.1+dfsg/source/nm-ikec/config.h
+@@ -0,0 +1,117 @@
++
++/*
++ * Copyright (c) 2007
++ *      Shrew Soft Inc.  All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Redistributions in any form must be accompanied by information on
++ *    how to obtain complete source code for the software and any
++ *    accompanying software that uses the software.  The source code
++ *    must either be included in the distribution or be available for no
++ *    more than the cost of distribution plus a nominal fee, and must be
++ *    freely redistributable under reasonable conditions.  For an
++ *    executable file, complete source code means the source code for all
++ *    modules it contains.  It does not include source code for modules or
++ *    files that typically accompany the major components of the operating
++ *    system on which the executable file runs.
++ *
++ * THIS SOFTWARE IS PROVIDED BY SHREW SOFT INC ``AS IS'' AND ANY EXPRESS
++ * OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
++ * WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, OR
++ * NON-INFRINGEMENT, ARE DISCLAIMED.  IN NO EVENT SHALL SHREW SOFT INC
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ *
++ * AUTHOR : Matthew Grooms
++ *          mgrooms@shrew.net
++ *
++ */
++
++#ifndef _CONFIG_H_
++#define _CONFIG_H_
++
++#include "libidb.h"
++
++#define MAX_CONFSTRING	256
++
++#define DATA_STRING	1
++#define DATA_NUMBER	2
++#define DATA_BINARY	3
++
++#define CONFIG_OK	0
++#define CONFIG_FAILED	1
++#define CONFIG_CANCEL	2
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++typedef class _CFGDAT : public IDB_ENTRY
++{
++	friend class _CONFIG;
++
++	public:
++	BDATA	key;
++
++	long	type;
++	BDATA	vval;
++	long	nval;
++
++	protected:
++	_CFGDAT();
++
++}CFGDAT;
++
++typedef class DLX _CONFIG : public IDB_LIST
++{
++	protected:
++	
++	BDATA		id;
++	
++	CFGDAT *	get_data( long type, const char * key, bool add = false );
++	
++	public:
++	
++	_CONFIG();
++	~_CONFIG();
++	
++	_CONFIG & operator = ( _CONFIG & value );
++	
++	bool	file_read( const char * path );
++	bool	file_write( const char * path );
++
++	bool	file_import_pcf( const char * path, bool & need_certs );
++	
++	bool		set_id( const char * id );
++	const char *	get_id();
++	
++	void	del( const char * key );
++	void	del_all();
++	
++	bool	add_string( const char * key, const char * val, size_t size );
++	bool	set_string( const char * key, const char * val, size_t size );
++	long	has_string( const char * key, const char * val, size_t size );
++	bool	get_string( const char * key, char * val, size_t size, int index );
++	bool	get_string( const char * key, BDATA & val, int index );
++
++	bool	set_number( const char * key, long val );
++	bool	get_number( const char * key, long * val );
++	
++	bool	set_binary( const char * key, BDATA & val );
++	bool	get_binary( const char * key, BDATA & val );
++	
++}CONFIG;
++
++#endif
+--- /dev/null
++++ ike-2.2.1+dfsg/source/nm-ikec/ikec.1
+@@ -0,0 +1,95 @@
++.\"
++.\" Copyright (c) 2007
++.\"      Shrew Soft Inc.  All rights reserved.
++.\"
++.\" Redistribution and use in source and binary forms, with or without
++.\" modification, are permitted provided that the following conditions
++.\" are met:
++.\" 1. Redistributions of source code must retain the above copyright
++.\"    notice, this list of conditions and the following disclaimer.
++.\" 2. Redistributions in binary form must reproduce the above copyright
++.\"    notice, this list of conditions and the following disclaimer in the
++.\"    documentation and/or other materials provided with the distribution.
++.\" 3. Redistributions in any form must be accompanied by information on
++.\"    how to obtain complete source code for the software and any
++.\"    accompanying software that uses the software.  The source code
++.\"    must either be included in the distribution or be available for no
++.\"    more than the cost of distribution plus a nominal fee, and must be
++.\"    freely redistributable under reasonable conditions.  For an
++.\"    executable file, complete source code means the source code for all
++.\"    modules it contains.  It does not include source code for modules or
++.\"    files that typically accompany the major components of the operating
++.\"    system on which the executable file runs.
++.\"
++.\" THIS SOFTWARE IS PROVIDED BY SHREW SOFT INC ``AS IS'' AND ANY EXPRESS
++.\" OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
++.\" WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, OR
++.\" NON-INFRINGEMENT, ARE DISCLAIMED.  IN NO EVENT SHALL SHREW SOFT INC
++.\" BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++.\" CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++.\" SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++.\" INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++.\" CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++.\" ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++.\" THE POSSIBILITY OF SUCH DAMAGE.
++.\"
++.\" AUTHOR : Matthew Grooms
++.\"          mgrooms@shrew.net
++.\"
++.\"
++.Dd Febuary 2, 2007
++.Dt IKEC 1
++.Os
++.Sh NAME
++.Nm ikec
++.Nd Internet Key Exchange Connect
++.Sh SYNOPSIS
++.Nm
++.Op Fl r Ar name
++.Op Fl u Ar username
++.Op Fl p Ar password
++.Op Fl a
++.Sh DESCRIPTION
++The
++.Nm
++command line application provides a simple interface for users to interact
++with
++.Xr iked 8
++( Shrew Soft IKE Daemon ). This interface allows a user to control an IPsec
++VPN Client connection with a remote gateway. The parameters used for the
++connection are described in a Site Configuration file ( see below ).
++.Pp
++The options are as follows:
++.Bl -tag -width Fl
++.It Fl r Ar name
++Specify the Site Configuration name.
++.It Fl u Ar username
++Specify the Xauth username for the connection.
++.It Fl p Ar password
++Specify the Xauth password for the connection.
++.It Fl a
++Automatically initiate the connection.
++.El
++.Sh RETURN VALUES
++The command exits with 0 on success, and non-zero on errors.
++.Sh FILES
++All user related configuration data is stored under the
++.Pa ~/.iked
++directory. Site Configuration files are stored under the
++.Pa ~/.iked/sites
++directory. Certificates and keys are are typically stored under the
++.Pa ~/.iked/certs
++directory. These directories are automatically created when the
++.Nm
++application is run for the first time by a user.
++.Sh SITE CONFIGRUATIONS
++TODO : copy info from readme.
++.Sh SEE ALSO
++.Xr iked 8 ,
++.Xr ikec-qt 1 ,
++.Xr ikea-qt 1 ,
++.Sh HISTORY
++The
++.Nm
++program was written by Matthew Grooms ( mgrooms@shrew.net ) as part
++of the Shrew Soft ( http://www.shrew.net ) family of IPsec products.
+--- /dev/null
++++ ike-2.2.1+dfsg/source/nm-ikec/ikec.cpp
+@@ -0,0 +1,2111 @@
++
++/*
++ * Copyright (c) 2007
++ *      Shrew Soft Inc.  All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Redistributions in any form must be accompanied by information on
++ *    how to obtain complete source code for the software and any
++ *    accompanying software that uses the software.  The source code
++ *    must either be included in the distribution or be available for no
++ *    more than the cost of distribution plus a nominal fee, and must be
++ *    freely redistributable under reasonable conditions.  For an
++ *    executable file, complete source code means the source code for all
++ *    modules it contains.  It does not include source code for modules or
++ *    files that typically accompany the major components of the operating
++ *    system on which the executable file runs.
++ *
++ * THIS SOFTWARE IS PROVIDED BY SHREW SOFT INC ``AS IS'' AND ANY EXPRESS
++ * OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
++ * WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, OR
++ * NON-INFRINGEMENT, ARE DISCLAIMED.  IN NO EVENT SHALL SHREW SOFT INC
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ *
++ * AUTHOR : Matthew Grooms
++ *          mgrooms@shrew.net
++ *
++ */
++
++#include <nm-setting-vpn.h>
++#include <nm-utils.h>
++#include <errno.h>
++#include <glib/garray.h>
++#include <nm-setting-ip4-config.h>
++#include <nm-remote-connection.h>
++#include <nm-remote-settings.h>
++#include <NetworkManager.h>
++#include <NetworkManagerVPN.h>
++
++#include "ikec.h"
++
++/* These are here because nm-dbus-glib-types.h isn't exported */
++#define DBUS_TYPE_G_ARRAY_OF_UINT          (dbus_g_type_get_collection ("GArray", G_TYPE_UINT))
++#define DBUS_TYPE_G_ARRAY_OF_ARRAY_OF_UINT (dbus_g_type_get_collection ("GPtrArray", DBUS_TYPE_G_ARRAY_OF_UINT))
++
++G_DEFINE_TYPE (NMIKECPlugin, nm_ikec_plugin, NM_TYPE_VPN_PLUGIN);
++
++#define NM_IKEC_PLUGIN_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), NM_TYPE_IKEC_PLUGIN, NMIKECPluginPrivate))
++
++typedef struct {
++        const char *name;
++        GType type;
++        gint int_min;
++        gint int_max;
++		bool required;
++		bool found;
++} ValidProperty;
++
++typedef struct ValidateInfo {
++    ValidProperty *table;
++    GError **error;
++    gboolean have_items;
++} ValidateInfo;
++
++static ValidProperty valid_properties[] = {
++		{ NM_IKEC_KEY_NETWORK_HOST,			G_TYPE_STRING, 0, 0, true, 0 },
++		{ NM_IKEC_KEY_NETWORK_IKE_PORT,		G_TYPE_STRING, 0, 0, true, 0 },
++		{ NM_IKEC_KEY_CLIENT_AUTO_MODE,		G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_NETWORK_NATT_MODE,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_NETWORK_NATT_PORT,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_NETWORK_NATT_RATE,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_NETWORK_FRAG_MODE,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_NETWORK_FRAG_SIZE,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_NETWORK_DPD_ENABLE,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_NETWORK_NOTIFY_ENABLE,G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_CLIENT_BANNER_ENABLE,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_IDENT_CLIENT_TYPE,	G_TYPE_STRING, 0, 0, true, 0 },
++		{ NM_IKEC_KEY_IDENT_SERVER_TYPE,	G_TYPE_STRING, 0, 0, true, 0 },
++		{ NM_IKEC_KEY_PHASE1_EXCHANGE,		G_TYPE_STRING, 0, 0, true, 0 },
++		{ NM_IKEC_KEY_PHASE1_CIPHER,		G_TYPE_STRING, 0, 0, true, 0 },
++		{ NM_IKEC_KEY_PHASE1_KEYLEN,		G_TYPE_STRING, 0, 0, true, 0 },
++		{ NM_IKEC_KEY_PHASE1_HASH,			G_TYPE_STRING, 0, 0, true, 0 },
++		{ NM_IKEC_KEY_PHASE1_DHGROUP,		G_TYPE_STRING, 0, 0, true, 0 },
++		{ NM_IKEC_KEY_AUTH_METHOD,			G_TYPE_STRING, 0, 0, true, 0 },
++		{ NM_IKEC_KEY_PHASE1_LIFE_SECS,		G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_PHASE1_LIFE_KBYTES,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_PHASE2_TRANSFORM,		G_TYPE_STRING, 0, 0, true, 0 },
++		{ NM_IKEC_KEY_PHASE2_KEYLEN,		G_TYPE_STRING, 0, 0, true, 0 },
++		{ NM_IKEC_KEY_PHASE2_HMAC,			G_TYPE_STRING, 0, 0, true, 0 },
++		{ NM_IKEC_KEY_PHASE2_PFSGROUP,		G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_PHASE2_LIFE_SECS,		G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_PHASE2_LIFE_KBYTES,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_IPCOMP_TRANSFORM,		G_TYPE_STRING, 0, 0, true, 0 },
++		{ NM_IKEC_KEY_CLIENT_IFACE,			G_TYPE_STRING, 0, 0, true, 0 },
++		{ NM_IKEC_KEY_CLIENT_ADDR_AUTO,		G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_CLIENT_IP_ADDR,		G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_CLIENT_IP_MASK,		G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_NETWORK_MTU_SIZE,		G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_NETWORK_UPDOWN_SCRIPT,G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_NETWORK_UPDOWN_DNS,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_CLIENT_WINS_ENABLE,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_CLIENT_WINS_AUTO,		G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_CLIENT_WINS_ADDR,		G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_CLIENT_DNS_USED,		G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_CLIENT_DNS_AUTO,		G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_CLIENT_DNS_ADDR,		G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_CLIENT_DNS_SUFFIX_AUTO,G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_CLIENT_DNS_SUFFIX,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_POLICY_LEVEL,			G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_POLICY_NAILED,		G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_POLICY_LIST_AUTO,		G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_VENDOR_CHKPT_ENABLE,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_IDENT_CLIENT_DATA,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_IDENT_SERVER_DATA,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_AUTH_SERVER_CERT,		G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_AUTH_SERVER_CERT_NAME,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_AUTH_SERVER_CERT_DATA,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_AUTH_CLIENT_CERT,		G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_AUTH_CLIENT_CERT_NAME,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_AUTH_CLIENT_CERT_DATA,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_AUTH_CLIENT_KEY,		G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_AUTH_CLIENT_KEY_NAME,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_AUTH_CLIENT_KEY_DATA,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_AUTH_MUTUAL_PSK,		G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_CLIENT_SPLITDNS_LIST,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_POLICY_LIST_EXCLUDE,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ NM_IKEC_KEY_POLICY_LIST_INCLUDE,	G_TYPE_STRING, 0, 0, false, 0 },
++		{ "xauth-user-flags",				G_TYPE_INT, 0, 4, false, 0},
++		{ "xauth-passwd-flags",				G_TYPE_INT, 0, 4, false, 0},
++        { NULL,                           G_TYPE_NONE, 0, 0 }
++};
++
++static ValidProperty valid_secrets[] = {
++        { NM_IKEC_KEY_XAUTH_USER,	G_TYPE_STRING, 0, 0, true, 0 },
++        { NM_IKEC_KEY_XAUTH_PASSWD,	G_TYPE_STRING, 0, 0, true, 0 },
++        { NULL,                       G_TYPE_NONE, 0, 0, false, 0 }
++};
++
++static bool
++check_required_properties (ValidateInfo *info)
++{
++	int i;
++
++    for (i = 0; info->table[i].name; i++) {
++        ValidProperty *prop = &info->table[i];
++
++		if (prop->required && !prop->found) {
++			return FALSE;
++		}
++	}
++
++	return TRUE;
++}
++
++
++static void
++validate_one_property (const char *key, const char *value, gpointer user_data)
++{
++    ValidateInfo *info = (ValidateInfo *) user_data;
++    int i;
++
++    if (*(info->error))
++        return;
++
++    info->have_items = TRUE;
++
++    /* 'name' is the setting name; always allowed but unused */
++    if (!strcmp (key, NM_SETTING_NAME))
++        return;
++
++    for (i = 0; info->table[i].name; i++) {
++        ValidProperty *prop = &info->table[i];
++        long int tmp;
++
++        if (strcmp (prop->name, key))
++            continue;
++
++        switch (prop->type) {
++        case G_TYPE_STRING:
++			prop->found = true;
++            return; /* valid */
++        case G_TYPE_INT:
++            errno = 0;
++            tmp = strtol (value, NULL, 10);
++            if (errno == 0 && tmp >= prop->int_min && tmp <= prop->int_max) {
++				prop->found = true;
++                return; /* valid */
++			}
++
++            g_set_error (info->error,
++                         NM_VPN_PLUGIN_ERROR,
++                         NM_VPN_PLUGIN_ERROR_BAD_ARGUMENTS,
++                         "invalid integer property '%s' or out of range [%d -> %d]",
++                         key, prop->int_min, prop->int_max);
++            break;
++        case G_TYPE_BOOLEAN:
++            if (!strcmp (value, "yes") || !strcmp (value, "no")) {
++				prop->found = true;
++                return; /* valid */
++			}
++
++            g_set_error (info->error,
++                         NM_VPN_PLUGIN_ERROR,
++                         NM_VPN_PLUGIN_ERROR_BAD_ARGUMENTS,
++                         "invalid boolean property '%s' (not yes or no)",
++                         key);
++            break;
++        default:
++            g_set_error (info->error,
++                         NM_VPN_PLUGIN_ERROR,
++                         NM_VPN_PLUGIN_ERROR_BAD_ARGUMENTS,
++                         "unhandled property '%s' type %s",
++                         key, g_type_name (prop->type));
++            break;
++        }
++    }
++
++    /* Did not find the property from valid_properties or the type did not match */
++    if (!info->table[i].name && strncmp(key, "form:", 5)) {
++        g_set_error (info->error,
++                     NM_VPN_PLUGIN_ERROR,
++                     NM_VPN_PLUGIN_ERROR_BAD_ARGUMENTS,
++                     "property '%s' invalid or not supported",
++                     key);
++    }
++}
++
++static gboolean
++nm_ikec_properties_validate (NMSettingVPN *s_vpn, GError **error)
++{
++    ValidateInfo info = { &valid_properties[0], error, FALSE };
++
++	g_warning ("(%d): s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d", __LINE__, s_vpn, NM_IS_SETTING_VPN (s_vpn));
++    nm_setting_vpn_foreach_data_item (s_vpn, validate_one_property, &info);
++
++	if (!check_required_properties (&info)) {
++        g_set_error (error,
++                     NM_VPN_PLUGIN_ERROR,
++                     NM_VPN_PLUGIN_ERROR_BAD_ARGUMENTS,
++                     "%s",
++                     "Missing VPN configuration option(s)!");
++		return FALSE;
++	}
++
++    if (!info.have_items) {
++        g_set_error (error,
++                     NM_VPN_PLUGIN_ERROR,
++                     NM_VPN_PLUGIN_ERROR_BAD_ARGUMENTS,
++                     "%s",
++                     "No VPN configuration options.");
++        return FALSE;
++    }
++
++    return *error ? FALSE : TRUE;
++}
++
++static gboolean
++nm_ikec_secrets_validate (NMSettingVPN *s_vpn, GError **error)
++{
++    ValidateInfo info = { &valid_secrets[0], error, FALSE };
++
++	g_warning ("(%d): s_vpn: %p", __LINE__, s_vpn);
++    nm_setting_vpn_foreach_secret (s_vpn, validate_one_property, &info);
++
++	if (!check_required_properties (&info)) {
++        g_set_error (error,
++                     NM_VPN_PLUGIN_ERROR,
++                     NM_VPN_PLUGIN_ERROR_BAD_ARGUMENTS,
++                     "%s",
++                     "Missing VPN secret(s)!");
++		return FALSE;
++	}
++
++    if (!info.have_items) {
++        g_set_error (error,
++                     NM_VPN_PLUGIN_ERROR,
++                     NM_VPN_PLUGIN_ERROR_BAD_ARGUMENTS,
++                     "%s",
++                     "No VPN secrets!");
++        return FALSE;
++    }
++
++    return *error ? FALSE : TRUE;
++}
++
++static gboolean
++real_connect (NMVPNPlugin   *plugin,
++              NMConnection  *connection,
++			  GError       **error)
++{
++	NMIKECPluginPrivate *priv = NM_IKEC_PLUGIN_GET_PRIVATE (plugin);
++	bool ret = FALSE;
++	NMSettingVPN *s_vpn;
++
++	s_vpn = NM_SETTING_VPN (nm_connection_get_setting (connection, NM_TYPE_SETTING_VPN));
++	g_warning ("(%d): s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, connection: %p", __LINE__, s_vpn, NM_IS_SETTING_VPN (s_vpn), connection);
++	g_assert (s_vpn);
++	if (!nm_ikec_properties_validate (s_vpn, error))
++		goto out;
++	if (!nm_ikec_secrets_validate (s_vpn, error))
++		goto out;
++
++	g_warning ("%s %d (%s)", __FILE__, __LINE__, __func__);
++	ret = priv->ikec->connect(plugin, connection, error, false);
++	g_warning ("%s %d (%s)", __FILE__, __LINE__, __func__);
++
++out:
++	return ret;
++}
++
++static gboolean
++real_disconnect (NMVPNPlugin   *plugin,
++			  GError       **error)
++{
++	NMIKECPluginPrivate *priv = NM_IKEC_PLUGIN_GET_PRIVATE (plugin);
++
++	return priv->ikec->disconnect(error);
++}
++
++static gboolean
++real_need_secrets (NMVPNPlugin *plugin,
++                   NMConnection *connection,
++                   char **setting_name,
++                   GError **error)
++{
++	NMSettingVPN *s_vpn;
++
++	g_return_val_if_fail (NM_IS_VPN_PLUGIN (plugin), FALSE);
++	g_return_val_if_fail (NM_IS_CONNECTION (connection), FALSE);
++
++	s_vpn = NM_SETTING_VPN (nm_connection_get_setting (connection, NM_TYPE_SETTING_VPN));
++	if (!s_vpn) {
++		g_set_error (error,
++				NM_VPN_PLUGIN_ERROR,
++				NM_VPN_PLUGIN_ERROR_CONNECTION_INVALID,
++				"%s",
++				"Could not process the request because the VPN connection settings were invalid.");
++		return FALSE;
++	}
++
++	if (!nm_setting_vpn_get_secret (s_vpn, NM_IKEC_KEY_XAUTH_USER)) {
++		*setting_name = NM_SETTING_VPN_SETTING_NAME;
++		return TRUE;
++	}
++	if (!nm_setting_vpn_get_secret (s_vpn, NM_IKEC_KEY_XAUTH_PASSWD)) {
++		*setting_name = NM_SETTING_VPN_SETTING_NAME;
++		return TRUE;
++	}
++
++	return FALSE;
++}
++
++
++static void
++nm_ikec_plugin_init (NMIKECPlugin *plugin)
++{
++}
++
++static void
++nm_ikec_plugin_class_init (NMIKECPluginClass *ikec_class)
++{
++	GObjectClass *object_class = G_OBJECT_CLASS (ikec_class);
++	NMVPNPluginClass *parent_class = NM_VPN_PLUGIN_CLASS (ikec_class);
++
++	g_type_class_add_private (object_class, sizeof (NMIKECPluginPrivate));
++
++	/* virtual methods */
++	parent_class->connect    = real_connect;
++	parent_class->need_secrets = real_need_secrets;
++	parent_class->disconnect = real_disconnect;
++}
++
++NMIKECPlugin *
++nm_ikec_plugin_new (void)
++{
++	return (NMIKECPlugin *) g_object_new (NM_TYPE_IKEC_PLUGIN,
++			NM_VPN_PLUGIN_DBUS_SERVICE_NAME, NM_DBUS_SERVICE_IKEC,
++			NULL);
++}
++
++
++
++//==============================================================================
++// Base IKEC class
++//==============================================================================
++
++_IKEC::_IKEC()
++{
++	memset( &stats, 0, sizeof( stats ) );
++
++	cstate = IKEC_STATE_DISCONNECTED;
++}
++
++_IKEC::~_IKEC()
++{
++}
++
++IKEC_STATE _IKEC::state()
++{
++	return cstate;
++}
++
++bool _IKEC::load( BDATA & name )
++{
++	if( !name.size() )
++		return false;
++	
++	fspec = name;
++	fspec.add( "", 1 );
++
++	fpath = sites;
++	fpath.add( "/", 1 );
++	fpath.add( name );
++	fpath.add( "", 1 );
++
++	if( !config.file_read( fpath.text() ) )
++	{
++		log( STATUS_FAIL, "failed to load \'%s\'\n",
++			fspec.text() );
++
++		return false;
++	}
++
++	log( 0, "config loaded for site \'%s\'\n",
++		fspec.text() );
++
++	config.set_id( fspec.text() );
++
++	return true;
++}
++
++bool
++_IKEC_NM::connect(NMVPNPlugin *plugin, NMConnection *connection, GError **error, bool wait_input)
++{
++	s_vpn = NM_SETTING_VPN (nm_connection_get_setting (connection, NM_TYPE_SETTING_VPN));
++	nm_connection = nm_connection_duplicate(connection);
++	g_warning ("(%d): s_vpn: %p", __LINE__, s_vpn);
++
++	if( cstate != IKEC_STATE_DISCONNECTED )
++	{
++		log( STATUS_FAIL, "tunnel connected! try disconnecting first (%d)\n", cstate );
++
++		return false;
++	}
++
++	connecting.reset();
++
++	g_warning ("(%d): s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, NM_IS_CONNECTION: %d", __LINE__, s_vpn, NM_IS_SETTING_VPN (s_vpn), NM_IS_CONNECTION(nm_connection));
++	exec( s_vpn );
++	g_warning ("(%d): s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, NM_IS_CONNECTION: %d", __LINE__, s_vpn, NM_IS_SETTING_VPN (s_vpn), NM_IS_CONNECTION(nm_connection));
++
++	if( wait_input )
++		connecting.wait( -1 );
++
++	return true;
++}
++
++bool _IKEC::disconnect(GError **error)
++{
++	if( cstate == IKEC_STATE_DISCONNECTED )
++	{
++		g_set_error (error,
++				NM_VPN_PLUGIN_ERROR,
++				NM_VPN_PLUGIN_ERROR_CONNECTION_INVALID,
++				"%s",
++				"Unable to disconnect: Not connected!");
++		log( STATUS_FAIL,
++			"tunnel disconnected! try connecting first\n" );
++
++		return false;
++	}
++
++	ikei.wakeup();
++
++	return true;
++}
++
++static GValue *
++str_to_gvalue (const char *str, gboolean try_convert)
++{
++	GValue *val;
++
++	/* Empty */
++	if (!str || strlen (str) < 1)
++		return NULL;
++
++	if (!g_utf8_validate (str, -1, NULL)) {
++		if (try_convert && !(str = g_convert (str, -1, "ISO-8859-1", "UTF-8", NULL, NULL, NULL)))
++			str = g_convert (str, -1, "C", "UTF-8", NULL, NULL, NULL);
++
++		if (!str)
++			/* Invalid */
++			return NULL;
++	}
++
++	val = g_slice_new0 (GValue);
++	g_value_init (val, G_TYPE_STRING);
++	g_value_set_string (val, str);
++
++	return val;
++}
++
++
++static GValue *
++uint_to_gvalue (guint32 num)
++{
++	GValue *val;
++
++	val = g_slice_new0 (GValue);
++	g_value_init (val, G_TYPE_UINT);
++	g_value_set_uint (val, num);
++
++	return val;
++}
++
++static GValue *
++bool_to_gvalue (gboolean num)
++{
++	GValue *val;
++
++	val = g_slice_new0 (GValue);
++	g_value_init (val, G_TYPE_BOOLEAN);
++	g_value_set_boolean (val, num);
++
++	return val;
++}
++
++long _IKEC_NM::func( void * )
++{
++	g_warning ("(%d): s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, NM_IS_CONNECTION: %d", __LINE__, s_vpn, NM_IS_SETTING_VPN (s_vpn), NM_IS_CONNECTION(nm_connection));
++	s_vpn = NM_SETTING_VPN (nm_connection_get_setting (nm_connection, NM_TYPE_SETTING_VPN));
++	g_warning ("(%d): s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, NM_IS_CONNECTION: %d", __LINE__, s_vpn, NM_IS_SETTING_VPN (s_vpn), NM_IS_CONNECTION(nm_connection));
++	memset( &peer, 0, sizeof( peer ) );
++	memset( &xconf, 0, sizeof( xconf ) );
++
++	//
++	// load the config into ipsecc
++	//
++	long	numb;
++	const char	*text;
++	BDATA bdata;
++
++	//
++	// ---------- PEER CONFIG ----------
++	//
++
++	// default values
++
++	peer.contact = IPSEC_CONTACT_CLIENT;
++	peer.plcy_mode = POLICY_MODE_CONFIG;
++	peer.notify = true;
++
++	// network host
++
++	if( !(text = nm_setting_vpn_get_data_item (s_vpn, "network-host")) )
++	{
++		g_warning ("(%d): s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d", __LINE__, s_vpn, NM_IS_SETTING_VPN (s_vpn));
++		log( STATUS_FAIL, "config error : network-host undefined\n" );
++		return -1;
++	}
++
++	const char * host = text;
++	while( host && * host == ' ' )
++		host++;
++
++	if( inet_addr( host ) != INADDR_NONE )
++	{
++		peer.saddr.saddr4.sin_family = AF_INET;
++		peer.saddr.saddr4.sin_addr.s_addr = inet_addr( host );
++	}
++	else
++	{
++		struct hostent * hp = gethostbyname( host );
++		if( !hp )
++		{
++			log( STATUS_FAIL, "config error : cannot resolve address for host %s\n", host );
++			return -1;
++		}
++
++		peer.saddr.saddr4.sin_family = hp->h_addrtype;
++		memcpy( &peer.saddr.saddr4.sin_addr, hp->h_addr, hp->h_length );
++	}
++
++	// network port
++
++	if (!(text = nm_setting_vpn_get_data_item (s_vpn, "network-ike-port")) || !(numb = atoi(text)))
++	{
++		log( STATUS_FAIL, "config error : network-ike-port undefined\n" );
++		return -1;
++	}
++
++	peer.saddr.saddr4.sin_port = htons( ( unsigned short ) numb );
++
++	// client auto config mode
++
++	peer.xconf_mode = CONFIG_MODE_NONE;
++
++	if( (text = nm_setting_vpn_get_data_item (s_vpn, "client-auto-mode")) )
++	{
++		if( !strcmp( "push", text ) )
++			peer.xconf_mode = CONFIG_MODE_PUSH;
++
++		if( !strcmp( "pull", text ) )
++			peer.xconf_mode = CONFIG_MODE_PULL;
++
++		if( !strcmp( "dhcp", text ) )
++			peer.xconf_mode = CONFIG_MODE_DHCP;
++	}
++
++	// nat-t enable
++
++	peer.natt_mode = IPSEC_NATT_DISABLE;
++	peer.natt_port = htons( 4500 );
++	peer.natt_rate = 30;
++
++#ifdef OPT_NATT
++
++	if( (text = nm_setting_vpn_get_data_item (s_vpn, "network-natt-mode")) )
++	{
++		if( !strcmp( "enable", text ) )
++			peer.natt_mode = IPSEC_NATT_ENABLE;
++
++		if( !strcmp( "force", text ) )
++			peer.natt_mode = IPSEC_NATT_FORCE_RFC;
++
++		if( !strcmp( "force-draft", text ) )
++			peer.natt_mode = IPSEC_NATT_FORCE_DRAFT;
++
++		if( !strcmp( "force-rfc", text ) )
++			peer.natt_mode = IPSEC_NATT_FORCE_RFC;
++
++		// nat-t udp port
++
++		text = nm_setting_vpn_get_data_item (s_vpn, "network-natt-port");
++		if( text && (numb = atoi(text) ))
++			peer.natt_port = htons( ( unsigned short ) numb );
++
++		// nat-t keep-alive rate
++
++		if ((text = nm_setting_vpn_get_data_item (s_vpn, "network-natt-rate")) && (numb = atoi(text)))
++			peer.natt_rate = numb;
++	}
++
++#endif
++
++	// ike fragmentation enable
++
++	peer.frag_esp_mode = IPSEC_FRAG_DISABLE;
++	peer.frag_ike_mode = IPSEC_FRAG_DISABLE;
++
++	if( (text = nm_setting_vpn_get_data_item (s_vpn, "network-frag-mode")) )
++	{
++		if( !strcmp( "enable", text ) )
++			peer.frag_ike_mode = IPSEC_FRAG_ENABLE;
++
++		if( !strcmp( "force", text ) )
++			peer.frag_ike_mode = IPSEC_FRAG_FORCE;
++
++		// ike fragmentation size
++
++		peer.frag_ike_size = 520;
++		if (!(text = nm_setting_vpn_get_data_item (s_vpn, "network-frag-size")) || !(numb = atoi(text)))
++			peer.frag_ike_size = numb;
++	}
++
++	// dpd enable
++
++	peer.dpd_mode = IPSEC_DPD_DISABLE;
++	peer.dpd_delay = 15;
++	peer.dpd_retry = 5;
++
++	if ((text = nm_setting_vpn_get_data_item (s_vpn, "network-dpd-enable")) && (atoi(text)))
++		peer.dpd_mode = IPSEC_DPD_ENABLE;
++
++	// isakmp notify
++
++	if ((text = nm_setting_vpn_get_data_item (s_vpn, "network-dpd-enable")) && (atoi(text)))
++		peer.notify = true;
++
++	// request motd banner
++
++	if ((text = nm_setting_vpn_get_data_item (s_vpn, "network-dpd-enable")) && (atoi(text)))
++		xconf.rqst |= IPSEC_OPTS_BANNER;
++
++	//
++	// ---------- IDENTITY CONFIG ----------
++	//
++
++	// client identification type
++
++	peer.idtype_l = 255;
++
++	if( !(text = nm_setting_vpn_get_data_item (s_vpn, "ident-client-type")) )
++	{
++		log( STATUS_FAIL, "config error : auth-client-type undefined\n" );
++		return -1;
++	}
++
++	if( !strcmp( "none", text ) )
++		peer.idtype_l = ISAKMP_ID_NONE;
++
++	if( !strcmp( "asn1dn", text ) )
++		peer.idtype_l = ISAKMP_ID_ASN1_DN;
++
++	if( !strcmp( "keyid", text ) )
++		peer.idtype_l = ISAKMP_ID_KEY_ID;
++
++	if( !strcmp( "fqdn", text ) )
++		peer.idtype_l = ISAKMP_ID_FQDN;
++
++	if( !strcmp( "ufqdn", text ) )
++		peer.idtype_l = ISAKMP_ID_USER_FQDN;
++
++	if( !strcmp( "address", text ) )
++		peer.idtype_l = ISAKMP_ID_IPV4_ADDR;
++
++	if( peer.idtype_l == 255 )
++	{
++		log( STATUS_FAIL, "config error : ident-client-type is invalid\n" );
++		return -1;
++	}
++
++	// server identification type
++
++	peer.idtype_r = 255;
++
++	if( !(text = nm_setting_vpn_get_data_item (s_vpn, "ident-server-type")) )
++	{
++		log( STATUS_FAIL, "config error : auth-server-idtype undefined\n" );
++		return -1;
++	}
++
++	if( !strcmp( "any", text ) )
++		peer.idtype_r = ISAKMP_ID_NONE;
++
++	if( !strcmp( "asn1dn", text ) )
++		peer.idtype_r = ISAKMP_ID_ASN1_DN;
++
++	if( !strcmp( "keyid", text ) )
++		peer.idtype_r = ISAKMP_ID_KEY_ID;
++
++	if( !strcmp( "fqdn", text ) )
++		peer.idtype_r = ISAKMP_ID_FQDN;
++
++	if( !strcmp( "ufqdn", text ) )
++		peer.idtype_r = ISAKMP_ID_USER_FQDN;
++
++	if( !strcmp( "address", text ) )
++		peer.idtype_r = ISAKMP_ID_IPV4_ADDR;
++
++	if( peer.idtype_r == 255 )
++	{
++		log( STATUS_FAIL, "config error : ident-server-type is invalid\n" );
++		return -1;
++	}
++
++	//
++	// ---------- IKSAMP PROPOSAL ----------
++	//
++
++	// phase1 exchange mode
++
++	if( !(text = nm_setting_vpn_get_data_item (s_vpn, "phase1-exchange")) )
++	{
++		log( STATUS_FAIL, "config error : phase1-exchange undefined\n" );
++		return -1;
++	}
++
++	if( !strcmp( "main", text ) )
++		peer.exchange = ISAKMP_EXCH_IDENT_PROTECT;
++
++	if( !strcmp( "aggressive", text ) )
++		peer.exchange = ISAKMP_EXCH_AGGRESSIVE;
++
++	if( !peer.exchange )
++	{
++		log( STATUS_FAIL, "config error : phase1-exchange is invalid\n" );
++		return -1;
++	}
++
++	memset( &proposal_isakmp, 0, sizeof( proposal_isakmp ) );
++
++	// defaults
++
++	proposal_isakmp.proto	= ISAKMP_PROTO_ISAKMP;
++	proposal_isakmp.xform	= ISAKMP_KEY_IKE;
++
++	// phase1 cipher type
++
++	if( !(text = nm_setting_vpn_get_data_item (s_vpn, "phase1-cipher")) )
++	{
++		log( STATUS_FAIL, "config error : phase1-cipher undefined\n" );
++		return -1;
++	}
++
++	if( !strcmp( "auto", text ) )
++		proposal_isakmp.ciph_id = 0;
++
++	if( !strcmp( "aes", text ) )
++		proposal_isakmp.ciph_id = IKE_CIPHER_AES;
++
++	if( !strcmp( "blowfish", text ) )
++		proposal_isakmp.ciph_id = IKE_CIPHER_BLOWFISH;
++
++	if( !strcmp( "3des", text ) )
++		proposal_isakmp.ciph_id = IKE_CIPHER_3DES;
++
++	if( !strcmp( "cast", text ) )
++		proposal_isakmp.ciph_id = IKE_CIPHER_CAST;
++
++	if( !strcmp( "des", text ) )
++		proposal_isakmp.ciph_id = IKE_CIPHER_DES;
++
++	// phase1 cipher keylength
++
++	if( ( proposal_isakmp.ciph_id == IKE_CIPHER_AES ) ||
++		( proposal_isakmp.ciph_id == IKE_CIPHER_BLOWFISH ) )
++	{
++		if (!(text = nm_setting_vpn_get_data_item (s_vpn, "phase1-keylen")) || !(numb = atoi(text)))
++		{
++			log( STATUS_FAIL, "config error : phase1-keylen undefined\n" );
++			return -1;
++		}
++
++		proposal_isakmp.ciph_kl = ( unsigned short ) numb;
++	}
++	
++	// phase1 hash type
++
++	if( !(text = nm_setting_vpn_get_data_item (s_vpn, "phase1-hash")) )
++	{
++		log( STATUS_FAIL, "config error : phase1-hash undefined\n" );
++		return -1;
++	}
++
++	if( !strcmp( "auto", text ) )
++		proposal_isakmp.hash_id = 0;
++
++	if( !strcmp( "md5", text ) )
++		proposal_isakmp.hash_id = IKE_HASH_MD5;
++
++	if( !strcmp( "sha1", text ) )
++		proposal_isakmp.hash_id = IKE_HASH_SHA1;
++
++	// phase1 dh group description
++
++	if (!(text = nm_setting_vpn_get_data_item (s_vpn, "phase1-dhgroup")) || !(numb = atoi(text)))
++	{
++		log( STATUS_FAIL, "config error : phase1-dhgroup undefined\n" );
++		return -1;
++	}
++
++	proposal_isakmp.dhgr_id = ( unsigned short ) numb;
++
++	// phase1 authentication mode
++
++	if( !(text = nm_setting_vpn_get_data_item (s_vpn, "auth-method")) )
++	{
++		log( STATUS_FAIL, "config error : auth-method undefined\n" );
++		return -1;
++	}
++
++	if( !strcmp( "hybrid-rsa-xauth", text ) )
++		proposal_isakmp.auth_id = HYBRID_AUTH_INIT_RSA;
++
++	if( !strcmp( "hybrid-grp-xauth", text ) )
++	{
++		proposal_isakmp.auth_id = HYBRID_AUTH_INIT_RSA;
++		xconf.opts |= IPSEC_OPTS_CISCO_GRP;
++	}
++
++	if( !strcmp( "mutual-rsa-xauth", text ) )
++		proposal_isakmp.auth_id = XAUTH_AUTH_INIT_RSA;
++
++	if( !strcmp( "mutual-psk-xauth", text ) )
++		proposal_isakmp.auth_id = XAUTH_AUTH_INIT_PSK;
++
++	if( !strcmp( "mutual-rsa", text ) )
++		proposal_isakmp.auth_id = IKE_AUTH_SIG_RSA;
++
++	if( !strcmp( "mutual-psk", text ) )
++		proposal_isakmp.auth_id = IKE_AUTH_PRESHARED_KEY;
++
++	// phase1 lifetime
++
++	if ((text = nm_setting_vpn_get_data_item (s_vpn, "phase1-life-secs")) && (numb = atoi(text)))
++		proposal_isakmp.life_sec	= numb;
++
++	if ((text = nm_setting_vpn_get_data_item (s_vpn, "phase1-life-kbytes")) && (numb = atoi(text)))
++		proposal_isakmp.life_kbs	= numb;
++
++	//
++	// ---------- ESP PROPOSAL ----------
++	//
++
++	memset( &proposal_esp, 0, sizeof( proposal_esp ) );
++
++	// defaults
++
++	proposal_esp.proto = ISAKMP_PROTO_IPSEC_ESP;
++	proposal_esp.encap = 1;
++
++	// phase2 transform type
++
++	if( !(text = nm_setting_vpn_get_data_item (s_vpn, "phase2-transform")) )
++	{
++		log( STATUS_FAIL, "config error : phase2-transform undefined\n" );
++		return -1;
++	}
++
++	if( !strcmp( "auto", text ) )
++		proposal_esp.xform = 0;
++
++	if( !strcmp( "esp-aes", text ) )
++		proposal_esp.xform = ISAKMP_ESP_AES;
++
++	if( !strcmp( "esp-blowfish", text ) )
++		proposal_esp.xform = ISAKMP_ESP_BLOWFISH;
++
++	if( !strcmp( "esp-3des", text ) )
++		proposal_esp.xform = ISAKMP_ESP_3DES;
++
++	if( !strcmp( "esp-cast", text ) )
++		proposal_esp.xform = ISAKMP_ESP_CAST;
++
++	if( !strcmp( "esp-des", text ) )
++		proposal_esp.xform = ISAKMP_ESP_DES;
++
++	// phase2 transform keylength
++
++	if( ( proposal_esp.xform == ISAKMP_ESP_AES ) ||
++		( proposal_esp.xform == ISAKMP_ESP_BLOWFISH ) )
++	{
++		if (!(text = nm_setting_vpn_get_data_item (s_vpn, "phase2-keylen")) || !(numb = atoi(text)))
++		{
++			log( STATUS_FAIL, "config error : phase2-keylen undefined\n" );
++			return -1;
++		}
++
++		proposal_esp.ciph_kl = ( unsigned short ) numb;
++	}
++
++	// phase2 hmac type
++
++	if( !(text = nm_setting_vpn_get_data_item (s_vpn, "phase2-hmac")) )
++	{
++		log( STATUS_FAIL, "config error : phase2-hmac undefined\n" );
++		return -1;
++	}
++
++	if( !strcmp( "auto", text ) )
++		proposal_esp.hash_id = 0;
++
++	if( !strcmp( "md5", text ) )
++		proposal_esp.hash_id = ISAKMP_AUTH_HMAC_MD5;
++
++	if( !strcmp( "sha1", text ) )
++		proposal_esp.hash_id = ISAKMP_AUTH_HMAC_SHA1;
++
++	// phase2 pfs group description
++
++	proposal_esp.dhgr_id = 0;
++
++	if ((text = nm_setting_vpn_get_data_item (s_vpn, "phase2-pfsgroup")) && (numb = atoi(text)))
++	{
++		if( !numb )
++			xconf.rqst |= IPSEC_OPTS_PFS;
++
++		if( ( numb == IKE_GRP_GROUP1 ) ||
++			( numb == IKE_GRP_GROUP2 ) ||
++			( numb == IKE_GRP_GROUP5 ) ||
++			( numb == IKE_GRP_GROUP14 ) ||
++			( numb == IKE_GRP_GROUP15 ) ||
++			( numb == IKE_GRP_GROUP16 ) )
++			proposal_esp.dhgr_id = ( unsigned short ) numb;
++	}
++
++	// phase2 lifetimes
++
++	if ((text = nm_setting_vpn_get_data_item (s_vpn, "phase2-life-secs")) && (numb = atoi(text)))
++		proposal_esp.life_sec = numb;
++
++	if ((text = nm_setting_vpn_get_data_item (s_vpn, "phase2-life-kbytes")) && (numb = atoi(text)))
++		proposal_esp.life_kbs = numb;
++
++	//
++	// ---------- IPCOMP PROPOSAL ----------
++	//
++
++	memset( &proposal_ipcomp, 0, sizeof( proposal_ipcomp ) );
++
++	// defaults
++
++	proposal_ipcomp.proto = ISAKMP_PROTO_IPCOMP;
++	proposal_ipcomp.encap = 0;
++
++	// ipcomp transform type
++
++	if( !(text = nm_setting_vpn_get_data_item (s_vpn, "ipcomp-transform")) )
++	{
++		log( STATUS_FAIL, "config error : ipcomp-transform undefined\n" );
++		return -1;
++	}
++
++	if( !strcmp( "none", text ) )
++		proposal_ipcomp.xform = ISAKMP_IPCOMP_NONE;
++
++	if( !strcmp( "deflate", text ) )
++		proposal_ipcomp.xform = ISAKMP_IPCOMP_DEFLATE;
++
++	if( !strcmp( "lzs", text ) )
++		proposal_ipcomp.xform = ISAKMP_IPCOMP_LZS;
++
++	if ((text = nm_setting_vpn_get_data_item (s_vpn, "phase2-life-secs")) && (numb = atoi(text)))
++		proposal_ipcomp.life_sec = numb;
++
++	if ((text = nm_setting_vpn_get_data_item (s_vpn, "phase2-life-kbytes")) && (numb = atoi(text)))
++		proposal_ipcomp.life_kbs = numb;
++
++	//
++	// ---------- CLIENT CONFIG ----------
++	//
++
++	// unity save password option
++
++	if( ( proposal_isakmp.auth_id == XAUTH_AUTH_INIT_PSK ) ||
++	    ( proposal_isakmp.auth_id == XAUTH_AUTH_INIT_RSA ) ||
++	    ( proposal_isakmp.auth_id == HYBRID_AUTH_INIT_RSA ) )
++		if( ( peer.xconf_mode == CONFIG_MODE_PULL ) ||
++		    ( peer.xconf_mode == CONFIG_MODE_PUSH ) )
++			xconf.rqst |= IPSEC_OPTS_SAVEPW;
++
++	// network interface type
++
++	if( !(text = nm_setting_vpn_get_data_item (s_vpn, "client-iface")) )
++	{
++		log( STATUS_FAIL, "config error : client-iface undefined\n" );
++		return -1;
++	}
++
++	if( !strcmp( "virtual", text ) )
++	{
++		xconf.iface[0] = '\0';
++		strncpy (xconf.iface, text, sizeof (xconf.iface));
++
++		xconf.opts |= ( IPSEC_OPTS_ADDR | IPSEC_OPTS_MASK );
++		xconf.rqst |= ( IPSEC_OPTS_ADDR | IPSEC_OPTS_MASK );
++
++		peer.plcy_mode = POLICY_MODE_CONFIG;
++
++		// ip address and netmask
++
++		if ((text = nm_setting_vpn_get_data_item (s_vpn, "client-addr-auto")))
++		{
++			numb = atoi(text);
++			if( !numb )
++			{
++				if( !(text = nm_setting_vpn_get_data_item (s_vpn, "client-ip-addr")) )
++				{
++					log( STATUS_FAIL, "config error : client-ip-addr undefined\n" );
++					return -1;
++				}
++
++				xconf.addr.s_addr = inet_addr( text );
++
++				if( !(text = nm_setting_vpn_get_data_item (s_vpn, "client-ip-mask")) )
++				{
++					log( STATUS_FAIL, "config error : client-ip-mask undefined\n" );
++					return -1;
++				}
++
++				xconf.mask.s_addr = inet_addr( text );
++
++				xconf.rqst &= ~( IPSEC_OPTS_ADDR | IPSEC_OPTS_MASK );
++			}
++		}
++
++		// adapter mtu
++
++		xconf.vmtu = 1500;
++		if ((text = nm_setting_vpn_get_data_item (s_vpn, "network-mtu-size")) && (numb = atoi(text)))
++			xconf.vmtu = numb;
++	}
++
++	// enable wins options
++
++	if ((text = nm_setting_vpn_get_data_item (s_vpn, "client-wins-enable")))
++	{
++		numb = atoi(text);
++		if( numb )
++		{
++			xconf.opts |= IPSEC_OPTS_NBNS;
++			xconf.rqst |= IPSEC_OPTS_NBNS;
++
++			// netbios name server address
++
++			text = nm_setting_vpn_get_data_item (s_vpn, "client-wins-auto");
++			numb =  atoi(text);
++
++			if (!numb)
++			{
++				// static server configuration
++
++				for( int index = 0; index < IPSEC_NBNS_MAX; index++ )
++				{
++					char tmp_name[32] = { 0 };
++					snprintf (tmp_name, sizeof (tmp_name), "client-wins-addr-%02d", index);
++					if(!(text = nm_setting_vpn_get_data_item (s_vpn, tmp_name)))
++						break;
++
++					xconf.nscfg.nbns_list[ index ].s_addr = inet_addr( text );
++					xconf.nscfg.nbns_count++;
++				}
++
++				if( !xconf.nscfg.nbns_count )
++				{
++					log( STATUS_FAIL, "config error : client-wins-addr undefined\n" );
++					return -1;
++				}
++
++				xconf.rqst &= ~IPSEC_OPTS_NBNS;
++			}
++		}
++	}
++
++	// enable dns options
++
++	if ((text = nm_setting_vpn_get_data_item (s_vpn, "client-dns-used")))
++	{
++		numb = atoi(text);
++		if( numb )
++		{
++			xconf.opts |= ( IPSEC_OPTS_DNSS | IPSEC_OPTS_DOMAIN );
++			xconf.rqst |= ( IPSEC_OPTS_DNSS | IPSEC_OPTS_DOMAIN );
++
++			text = nm_setting_vpn_get_data_item (s_vpn, "client-dns-auto");
++			numb = atoi(text);
++			if (!numb)
++			{
++				// dns server addresses
++
++				for( int index = 0; index < IPSEC_DNSS_MAX; index++ )
++				{
++					char tmp_name[32] = { 0 };
++					snprintf (tmp_name, sizeof (tmp_name), "client-dns-addr-%02d", index);
++					if(!(text = nm_setting_vpn_get_data_item (s_vpn, tmp_name)))
++						break;
++
++					xconf.nscfg.dnss_list[ index ].s_addr = inet_addr( text );
++					xconf.nscfg.dnss_count++;
++				}
++
++				if( !xconf.nscfg.dnss_count )
++				{
++					log( STATUS_FAIL, "config error : client-dns-addr undefined\n" );
++					return -1;
++				}
++
++				xconf.rqst &= ~IPSEC_OPTS_DNSS;
++
++				// domain name suffix
++
++				if( !(text = nm_setting_vpn_get_data_item (s_vpn, "client-dns-suffix")) )
++				{
++					xconf.opts &= ~IPSEC_OPTS_DOMAIN;
++					xconf.rqst &= ~IPSEC_OPTS_DOMAIN;
++				} else {
++					strncpy( xconf.nscfg.dnss_suffix, text, CONF_STRLEN );
++				}
++			}
++		}
++	}
++
++	// policy type
++
++	peer.plcy_level = POLICY_LEVEL_AUTO;
++
++	if( (text = nm_setting_vpn_get_data_item (s_vpn, "policy-level") ) )
++	{
++		if( !strcmp( "use", text ) )
++			peer.plcy_level = POLICY_LEVEL_USE;
++
++		if( !strcmp( "require", text ) )
++			peer.plcy_level = POLICY_LEVEL_REQUIRE;
++
++		if( !strcmp( "unique", text ) )
++			peer.plcy_level = POLICY_LEVEL_UNIQUE;
++
++		if( !strcmp( "shared", text ) )
++			peer.plcy_level = POLICY_LEVEL_SHARED;
++	}
++
++
++
++	// nailed policy enable
++
++	if ((text = nm_setting_vpn_get_data_item (s_vpn, "policy-nailed")) && (atoi(text)))
++		peer.nailed = true;
++
++	// auto policy enable
++
++	if ((text = nm_setting_vpn_get_data_item (s_vpn, "policy-list-auto")) && (atoi(text)))
++	{
++		xconf.rqst |= IPSEC_OPTS_SPLITNET;
++
++		peer.plcy_mode = POLICY_MODE_CONFIG;
++	}
++	else
++	{
++		peer.plcy_mode = POLICY_MODE_COMPAT;
++	}
++
++	// vendor compatibility options
++
++	if ((text = nm_setting_vpn_get_data_item (s_vpn, "vendor-chkpt-enable")) && (atoi(text)))
++		xconf.opts |= IPSEC_OPTS_VEND_CHKPT;
++
++	//
++	// ---------- CONNECT TO IKED ----------
++	//
++
++	long	result;
++	long	msgres;
++
++	if( ikei.attach( 3000 ) != IPCERR_OK )
++	{
++		log( STATUS_FAIL, "failed to attach to key daemon ...\n" );
++		nm_vpn_plugin_failure (NM_VPN_PLUGIN (nm_plugin), NM_VPN_PLUGIN_FAILURE_CONNECT_FAILED);
++		return -1;
++	}
++
++	log( STATUS_INFO, "attached to key daemon ...\n" );
++
++	//
++	// ---------- UPDATE STATE ----------
++	//
++
++	cstate = IKEC_STATE_CONNECTING;
++	set_state();
++
++	//
++	// send the peer configuration message
++	//
++
++	IKEI_MSG msg;
++
++	msg.set_peer( &peer );
++	result = ikei.send_message( msg, &msgres );
++
++	if( ( result != IPCERR_OK ) || ( msgres != IKEI_RESULT_OK ) )
++	{
++		log( STATUS_FAIL, "peer config failed\n" );
++		goto config_failed;
++	}
++
++	log( STATUS_INFO, "peer configured\n" );
++
++	//
++	// send proposal config messages
++	//
++
++	msg.set_proposal( &proposal_isakmp );
++	result = ikei.send_message( msg, &msgres );
++
++	if( ( result != IPCERR_OK ) || ( msgres != IKEI_RESULT_OK ) )
++	{
++		log( STATUS_FAIL, "isakmp proposal config failed\n" );
++		goto config_failed;
++	}
++
++	log( STATUS_INFO, "iskamp proposal configured\n" );
++
++	msg.set_proposal( &proposal_esp );
++	result = ikei.send_message( msg, &msgres );
++
++	if( ( result != IPCERR_OK ) || ( msgres != IKEI_RESULT_OK ) )
++	{
++		log( STATUS_FAIL, "esp proposal config failed\n" );
++		goto config_failed;
++	}
++
++	log( STATUS_INFO, "esp proposal configured\n" );
++
++	if( proposal_ipcomp.xform )
++	{
++		msg.set_proposal( &proposal_ipcomp );
++		result = ikei.send_message( msg, &msgres );
++
++		if( ( result != IPCERR_OK ) || ( msgres != IKEI_RESULT_OK ) )
++		{
++			log( STATUS_FAIL, "ipcomp proposal config failed\n" );
++			goto config_failed;
++		}
++
++		log( STATUS_INFO, "ipcomp proposal configured\n" );
++	}
++
++	//
++	// send the client configuration message
++	//
++
++	//xconf.flags = IP_CONF_OPTS_CLIENT | IP_CONF_OPTS_CLIENT_ROUTE | IP_CONF_OPTS_NO_TUN;
++	xconf.flags = IP_CONF_OPTS_CLIENT | IP_CONF_OPTS_CLIENT_ROUTE;
++	msg.set_client( &xconf );
++	result = ikei.send_message( msg, &msgres );
++
++	if( ( result != IPCERR_OK ) || ( msgres != IKEI_RESULT_OK ) )
++	{
++		log( STATUS_FAIL, "client config failed\n" );
++		goto config_failed;
++	}
++
++	log( STATUS_INFO, "client configured\n" );
++
++	//
++	// verify and send our xauth info
++	//
++
++	if( ( proposal_isakmp.auth_id == XAUTH_AUTH_INIT_PSK ) ||
++		( proposal_isakmp.auth_id == XAUTH_AUTH_INIT_RSA ) ||
++		( proposal_isakmp.auth_id == HYBRID_AUTH_INIT_RSA ) )
++	{
++		get_username();
++
++		msg.set_cfgstr( CFGSTR_CRED_XAUTH_USER, &username );
++		result = ikei.send_message( msg, &msgres );
++
++		if( ( result != IPCERR_OK ) || ( msgres != IKEI_RESULT_OK ) )
++		{
++			log( STATUS_FAIL, "xauth username config failed\n" );
++			goto config_failed;
++		}
++
++		get_password();
++
++		msg.set_cfgstr( CFGSTR_CRED_XAUTH_PASS, &password );
++		result = ikei.send_message( msg, &msgres );
++
++		if( ( result != IPCERR_OK ) || ( msgres != IKEI_RESULT_OK ) )
++		{
++			log( STATUS_FAIL, "xauth password config failed\n" );
++			goto config_failed;
++		}
++	}
++
++	//
++	// verify and send our identity info
++	//
++
++	// client id data
++
++	if ((text = nm_setting_vpn_get_data_item (s_vpn, "ident-client-data")))
++	{
++		bdata.set(text, strlen(text)+1);
++		msg.set_cfgstr( CFGSTR_CRED_LID, &bdata );
++		result = ikei.send_message( msg, &msgres );
++
++		if( ( result != IPCERR_OK ) || ( msgres != IKEI_RESULT_OK ) )
++		{
++			log( STATUS_FAIL, "local id config failed\n" );
++			goto config_failed;
++		}
++	}
++
++	log( STATUS_INFO, "local id configured\n" );
++
++	// server id data
++
++	if ((text = nm_setting_vpn_get_data_item (s_vpn, "ident-server-data")))
++	{
++		bdata.set(text, strlen(text)+1);
++		msg.set_cfgstr( CFGSTR_CRED_RID, &bdata );
++		result = ikei.send_message( msg, &msgres );
++
++		if( ( result != IPCERR_OK ) || ( msgres != IKEI_RESULT_OK ) )
++		{
++			log( STATUS_FAIL, "remote id config failed\n" );
++			goto config_failed;
++		}
++	}
++
++	log( STATUS_INFO, "remote id configured\n" );
++
++	//
++	// verify and send our peer authentication info
++	//
++
++	if( ( proposal_isakmp.auth_id == HYBRID_AUTH_INIT_RSA ) ||
++		( proposal_isakmp.auth_id == XAUTH_AUTH_INIT_RSA ) ||
++		( proposal_isakmp.auth_id == IKE_AUTH_SIG_RSA ) )
++	{
++		// server certificate
++
++		if (!(text = nm_setting_vpn_get_data_item (s_vpn, "auth-server-cert-data")))
++		{
++			log( STATUS_FAIL, "config error : auth-server-cert-data undefined\n" );
++			goto config_failed;
++		}
++
++		server_cert_rety:
++
++		bdata.set(text, strlen(text));
++		bdata.base64_decode();
++		msg.set_cfgstr( CFGSTR_CRED_RSA_RCRT, &bdata );
++		result = ikei.send_message( msg, &msgres );
++
++		if( ( result != IPCERR_OK ) || ( msgres == IKEI_RESULT_FAILED ) )
++		{
++			log( STATUS_FAIL, "server cert config failed\n" );
++			goto config_failed;
++		}
++
++		if( msgres == IKEI_RESULT_PASSWD )
++		{
++			if( !get_filepass() )
++			{
++				log( STATUS_FAIL, "server cert file requires password\n" );
++				goto config_failed;
++			}
++
++			msg.set_cfgstr( CFGSTR_CRED_FILE_PASS, &fpass );
++			result = ikei.send_message( msg, &msgres );
++
++			goto server_cert_rety;
++		}
++
++		log( STATUS_INFO, "server cert configured\n" );
++	}
++
++	if( ( proposal_isakmp.auth_id == XAUTH_AUTH_INIT_RSA ) ||
++		( proposal_isakmp.auth_id == IKE_AUTH_SIG_RSA ) )
++	{
++		// client certificate
++
++		if (!(text = nm_setting_vpn_get_data_item (s_vpn, "auth-client-cert-data")))
++		{
++			log( STATUS_FAIL, "config error : auth-client-cert-data undefined\n" );
++			goto config_failed;
++		}
++
++		client_cert_rety:
++
++		bdata.set(text, strlen(text)+1);
++		bdata.base64_decode();
++		msg.set_cfgstr( CFGSTR_CRED_RSA_LCRT, &bdata );
++		result = ikei.send_message( msg, &msgres );
++
++		if( ( result != IPCERR_OK ) || ( msgres == IKEI_RESULT_FAILED ) )
++		{
++			log( STATUS_FAIL, "client cert config failed\n" );
++			goto config_failed;
++		}
++
++		if( msgres == IKEI_RESULT_PASSWD )
++		{
++			if( !get_filepass() )
++			{
++				log( STATUS_FAIL, "client cert file requires password\n" );
++				goto config_failed;
++			}
++
++			msg.set_cfgstr( CFGSTR_CRED_FILE_PASS, &fpass );
++			result = ikei.send_message( msg, &msgres );
++
++			goto client_cert_rety;
++		}
++
++		log( STATUS_INFO, "client cert configured\n" );
++
++		// client private key
++
++		if (!(text = nm_setting_vpn_get_data_item (s_vpn, "auth-client-key-data")))
++		{
++			log( STATUS_FAIL, "config error : auth-client-key undefined\n" );
++			goto config_failed;
++		}
++
++		client_pkey_rety:
++
++		bdata.set(text, strlen(text)+1);
++		bdata.base64_decode();
++		msg.set_cfgstr( CFGSTR_CRED_RSA_LKEY, &bdata );
++		result = ikei.send_message( msg, &msgres );
++
++		if( ( result != IPCERR_OK ) || ( msgres == IKEI_RESULT_FAILED ) )
++		{
++			log( STATUS_FAIL, "client key config failed\n" );
++			goto config_failed;
++		}
++
++		if( msgres == IKEI_RESULT_PASSWD )
++		{
++			if( !get_filepass() )
++			{
++				log( STATUS_FAIL, "client key file requires password\n" );
++				goto config_failed;
++			}
++
++			msg.set_cfgstr( CFGSTR_CRED_FILE_PASS, &fpass );
++			result = ikei.send_message( msg, &msgres );
++
++			goto client_pkey_rety;
++		}
++
++		log( STATUS_INFO, "client key configured\n" );
++	}
++
++	if( ( proposal_isakmp.auth_id == XAUTH_AUTH_INIT_PSK ) ||
++		( proposal_isakmp.auth_id == IKE_AUTH_PRESHARED_KEY ) ||
++		( xconf.opts & IPSEC_OPTS_CISCO_GRP ) )
++	{
++		// mutual preshared key
++
++		BDATA psk;
++
++		if (!(text = nm_setting_vpn_get_data_item (s_vpn, "auth-mutual-psk")))
++		{
++			log( STATUS_FAIL, "config error : auth-mutual-psk undefined\n" );
++			goto config_failed;
++		}
++
++		psk.set(text, strlen(text));
++		msg.set_cfgstr( CFGSTR_CRED_PSK, &psk );
++		result = ikei.send_message( msg, &msgres );
++
++		if( ( result != IPCERR_OK ) || ( msgres == IKEI_RESULT_FAILED ) )
++		{
++			log( STATUS_FAIL, "pre-shared key config failed\n" );
++			goto config_failed;
++		}
++
++		log( STATUS_INFO, "pre-shared key configured\n" );
++	}
++
++	//
++	// define our splitdns domains
++	//
++
++	if(  ( xconf.opts & IPSEC_OPTS_SPLITDNS ) &&
++		!( xconf.rqst & IPSEC_OPTS_SPLITDNS ) )
++	{
++		int index = 0;
++		for (index = 0; ;index++) {
++			char tmp_name[32] = { 0 };
++			snprintf (tmp_name, sizeof (tmp_name), "client-splitdns-list-%02d", index);
++			if (!(text = nm_setting_vpn_get_data_item (s_vpn, tmp_name)))
++				break;
++
++			bdata.set(text, strlen(text)+1);
++			msg.set_cfgstr( CFGSTR_SPLIT_DOMAIN, &bdata );
++			result = ikei.send_message( msg, &msgres );
++
++			if( ( result != IPCERR_OK ) || ( msgres == IKEI_RESULT_FAILED ) )
++			{
++				log( STATUS_FAIL, "split domain name config failed\n" );
++				goto config_failed;
++			}
++		}
++	}
++
++	//
++	// define our manual remote id list
++	//
++
++	if( !( xconf.rqst & IPSEC_OPTS_SPLITNET ) )
++	{
++		int index = 0;
++
++		for (index = 0; ;index++) {
++			char tmp_name[32] = { 0 };
++			snprintf (tmp_name, sizeof (tmp_name), "policy-list-exclude-%02d", index);
++			if (!(text = nm_setting_vpn_get_data_item (s_vpn, tmp_name)))
++				break;
++
++			const char * split = strchr( text, '/' ) + 2;
++			unsigned long addr = inet_addr( text );
++			unsigned long mask = inet_addr( split );
++
++			IKE_PH2ID ph2id;
++			memset( &ph2id, 0, sizeof( ph2id ) );
++
++			ph2id.type = ISAKMP_ID_IPV4_ADDR_SUBNET;
++			ph2id.addr1.s_addr = addr;
++			ph2id.addr2.s_addr = mask;
++
++			msg.set_network( UNITY_SPLIT_EXCLUDE, &ph2id );
++			result = ikei.send_message( msg, &msgres );
++
++			if( ( result != IPCERR_OK ) || ( msgres == IKEI_RESULT_FAILED ) )
++			{
++				log( STATUS_FAIL, "policy include config failed\n" );
++				goto config_failed;
++			}
++		}
++
++		for (index = 0; ;index++) {
++			char tmp_name[32] = { 0 };
++			snprintf (tmp_name, sizeof (tmp_name), "policy-list-include-%02d", index);
++			if (!(text = nm_setting_vpn_get_data_item (s_vpn, tmp_name)))
++				break;
++
++			const char * split = strchr( text, '/' ) + 2;
++			unsigned long addr = inet_addr( text );
++			unsigned long mask = inet_addr( split );
++
++			IKE_PH2ID ph2id;
++			memset( &ph2id, 0, sizeof( ph2id ) );
++
++			ph2id.type = ISAKMP_ID_IPV4_ADDR_SUBNET;
++			ph2id.addr1.s_addr = addr;
++			ph2id.addr2.s_addr = mask;
++
++			msg.set_network( UNITY_SPLIT_INCLUDE, &ph2id );
++			result = ikei.send_message( msg, &msgres );
++
++			if( ( result != IPCERR_OK ) || ( msgres == IKEI_RESULT_FAILED ) )
++			{
++				log( STATUS_FAIL, "policy include config failed\n" );
++				goto config_failed;
++			}
++		}
++	}
++
++	//
++	// ---------- ENABLE TUNNEL ----------
++	//
++
++	msg.set_enable( true );
++	if( ikei.send_message( msg ) != IPCERR_OK )
++	{
++		log( STATUS_FAIL, "send enable failed\n" );
++		goto config_failed;
++	}
++
++	//
++	// no more user input past this point
++	//
++
++	connecting.alert();
++
++	//
++	// ---------- FEEDBACK LOOP ----------
++	//
++
++	{
++	long status;
++	DBusGConnection *connection = NULL;
++	GHashTable *config = NULL;
++	GValue *val = NULL;
++	GError *err = NULL;
++	GPtrArray *routes = NULL;
++	int is_full = 0;
++
++	connection = dbus_g_bus_get (DBUS_BUS_SYSTEM, &err);
++	if (!connection) {
++		g_warning ("Could not get the system bus: %s", err->message);
++		exit (1);
++	}
++
++
++	g_warning ("%s %d (%s)", __FILE__, __LINE__, __func__);
++	while( true )
++	{
++		//
++		// get the next message
++		//
++
++		result = ikei.recv_message( msg );
++
++		if( result == IPCERR_NODATA )
++			continue;
++
++		if( ( result == IPCERR_FAILED ) ||
++		    ( result == IPCERR_CLOSED ) )
++			break;
++
++		//
++		// check for user cancelation
++		//
++
++		if( result == IPCERR_WAKEUP )
++		{
++			msg.set_enable( false );
++			if( ikei.send_message( msg ) != IPCERR_OK )
++				break;
++
++			continue;
++		}
++
++		//
++		// evaluate the message
++		//
++
++		switch( msg.header.type )
++		{
++			// Misnamed on this end.
++			// Network settings.
++			case IKEI_MSGID_CLIENT:
++				g_warning ("%s %d (%s): IKEI_MSGID_CLIENT", __FILE__, __LINE__, __func__);
++				if( msg.get_client( &xconf ) != IPCERR_OK ) {
++					goto IKEI_MSGID_CLIENT_err;
++				}
++
++				if (config != NULL)
++				{
++					g_hash_table_destroy(config);
++					config = NULL;
++				}
++
++				config = g_hash_table_new (g_str_hash, g_str_equal);
++
++				if (routes != NULL)
++				{
++					g_ptr_array_free (routes, TRUE);
++					routes = NULL;
++				}
++
++				routes = g_ptr_array_new ();
++
++				val = uint_to_gvalue(peer.saddr.saddr4.sin_addr.s_addr);
++				if (val) {
++					g_hash_table_insert (config, (void *) NM_VPN_PLUGIN_IP4_CONFIG_GATEWAY, val);
++				} else {
++					goto IKEI_MSGID_CLIENT_err;
++				}
++
++				// XXX: FIXME: We need to have actual logic here.
++				if (!strcmp(xconf.iface, "default")) {
++					val = str_to_gvalue ("eth0.0", FALSE);
++				} else {
++					val = str_to_gvalue (xconf.iface, FALSE);
++				}
++				if (val)
++					g_hash_table_insert (config, (void *) NM_VPN_PLUGIN_IP4_CONFIG_TUNDEV, val);
++				else
++					goto IKEI_MSGID_CLIENT_err;
++
++				val = uint_to_gvalue(xconf.addr.s_addr);
++				if (val) {
++					g_hash_table_insert (config, (void *) NM_VPN_PLUGIN_IP4_CONFIG_ADDRESS, val);
++				} else
++					goto IKEI_MSGID_CLIENT_err;
++
++				val = uint_to_gvalue(xconf.addr.s_addr);
++				if (val) {
++					g_hash_table_insert (config, (void *) NM_VPN_PLUGIN_IP4_CONFIG_PTP, val);
++				} else
++					goto IKEI_MSGID_CLIENT_err;
++
++				unsigned int j;
++				for (j = 0; j < 32 && xconf.mask.s_addr & (1 << j); j++);
++				val = uint_to_gvalue(j);
++				g_hash_table_insert (config, (void *) NM_VPN_PLUGIN_IP4_CONFIG_PREFIX, val);
++
++				if (xconf.opts & IPSEC_OPTS_DNSS && xconf.nscfg.dnss_count > 0) {
++					GArray *array = g_array_sized_new (FALSE, TRUE, sizeof (guint32), xconf.nscfg.dnss_count);
++					for (j = 0; j < xconf.nscfg.dnss_count; j++) {
++						g_array_append_val(array, xconf.nscfg.dnss_list[j]);
++					}
++					val = g_slice_new0 (GValue);
++					g_value_init (val, DBUS_TYPE_G_UINT_ARRAY);
++					g_value_set_boxed (val, array);
++					g_hash_table_insert (config, (void *) NM_VPN_PLUGIN_IP4_CONFIG_DNS, val);
++				}
++
++				if (xconf.opts & IPSEC_OPTS_DOMAIN) {
++					val = str_to_gvalue(xconf.nscfg.dnss_suffix, 0);
++					if (val) {
++						g_hash_table_insert (config, (void *) NM_VPN_PLUGIN_IP4_CONFIG_DOMAIN, val);
++					} else {
++						goto IKEI_MSGID_CLIENT_err;
++					}
++				}
++
++				val = uint_to_gvalue (xconf.vmtu);
++				g_hash_table_insert (config, (void *) NM_VPN_PLUGIN_IP4_CONFIG_MTU, val);
++
++				g_warning ("%s %d (%s)", __FILE__, __LINE__, __func__);
++				msg.set_result( IKEI_RESULT_OK );
++				ikei.send_message( msg );
++				is_full = 0;
++				break;
++
++IKEI_MSGID_CLIENT_err:
++				g_warning ("%s %d (%s)", __FILE__, __LINE__, __func__);
++				msg.set_result( IKEI_RESULT_FAILED );
++				ikei.send_message( msg );
++				break;
++
++			//
++			// enable message
++			//
++
++			case IKEI_MSGID_ROUTE:
++			{
++				guint32 prefix = 0, metric = 100;
++				IPROUTE_ENTRY route_entry;
++				GArray *array;
++				long type = 0;
++
++				g_warning ("%s %d (%s): IKEI_MSGID_ROUTE", __FILE__, __LINE__, __func__);
++
++				msg.get_route( &type, &route_entry );
++
++				if (!route_entry.next.s_addr) {
++				    // Route via 0.0.0.0?  I don't think so.
++				    g_warning("Skipping route of %s/%d via 0.0.0.0 metric %d", inet_ntoa(route_entry.addr), prefix, metric);
++				} else {
++				    if (!route_entry.addr.s_addr) {
++					is_full = 1;
++					g_warning ("%d: Non-split tunnel.", __LINE__);
++				    } else {
++					for (prefix = 0; prefix < 32 && route_entry.mask.s_addr & (1 << prefix); prefix++);
++
++					array = g_array_sized_new (FALSE, TRUE, sizeof (guint32), 4);
++					g_array_append_val (array, route_entry.addr.s_addr);
++					g_array_append_val (array, prefix);
++					g_array_append_val (array, route_entry.next.s_addr);
++					g_array_append_val (array, metric);
++					g_ptr_array_add (routes, array);
++					g_warning("Added route: %s/%d (metric %d)", inet_ntoa(route_entry.addr), prefix, metric);
++					g_warning("Route via: %s, is_full %d", inet_ntoa(route_entry.next), is_full);
++				    }
++				}
++
++				msg.set_result( IKEI_RESULT_OK );
++				ikei.send_message( msg );
++
++				break;
++			}
++
++			case IKEI_MSGID_ENABLE:
++
++				if( msg.get_enable( &msgres ) != IPCERR_OK )
++					break;
++
++				g_warning ("%s %d (%s): IKEI_MSGID_ENABLE (%ld)", __FILE__, __LINE__, __func__, msgres);
++
++				if( msgres )
++					cstate = IKEC_STATE_CONNECTED;
++				else
++					cstate = IKEC_STATE_DISCONNECTING;
++
++				set_state();
++
++				break;
++
++			//
++			// status message
++			//
++
++			case IKEI_MSGID_STATUS:
++			{
++				if( msg.get_status( &status, &bdata ) != IPCERR_OK )
++					break;
++
++				set_status( status, bdata );
++
++				g_warning ("%s %d (%s): IKEI_MSGID_STATUS (%ld)", __FILE__, __LINE__, __func__, status);
++
++				if (status == STATUS_CONNECTED) {
++					GValue *value = NULL;
++
++#if defined(NM_VPN_PLUGIN_IP4_CONFIG_NEVER_DEFAULT)
++					if (is_full) {
++						g_hash_table_remove (config, (void *) NM_VPN_PLUGIN_IP4_CONFIG_NEVER_DEFAULT);
++//						g_hash_table_insert (config, (void *) NM_VPN_PLUGIN_IP4_CONFIG_NEVER_DEFAULT, bool_to_gvalue (0));
++						g_warning ("%d: Removing %s.", __LINE__, NM_VPN_PLUGIN_IP4_CONFIG_NEVER_DEFAULT);
++					} else {
++						g_hash_table_insert (config, (void *) NM_VPN_PLUGIN_IP4_CONFIG_NEVER_DEFAULT, bool_to_gvalue (1));
++						g_warning ("%d: Setting %s to yes.", __LINE__, NM_VPN_PLUGIN_IP4_CONFIG_NEVER_DEFAULT);
++					}
++#endif
++
++					if (routes->len > 0) {
++						value = g_new0 (GValue, 1);
++						g_value_init (value, DBUS_TYPE_G_ARRAY_OF_ARRAY_OF_UINT);
++						g_value_take_boxed (value, routes);
++						g_hash_table_insert (config, (void *) NM_VPN_PLUGIN_IP4_CONFIG_ROUTES, value);
++					} else {
++						g_ptr_array_free (routes, TRUE);
++						routes = NULL;
++					}
++
++					g_warning("is_full %d, routes->len %d", is_full, routes->len);
++
++					nm_vpn_plugin_set_ip4_config (NM_VPN_PLUGIN (nm_plugin), config);
++					nm_vpn_plugin_set_state (NM_VPN_PLUGIN (nm_plugin), NM_VPN_SERVICE_STATE_STARTED);
++				}
++
++				break;
++			}
++
++			//
++			// statistics message
++			//
++
++			case IKEI_MSGID_STATS:
++			{
++				if( msg.get_stats( &stats ) != IPCERR_OK )
++					break;
++
++				set_stats();
++
++				break;
++			}
++		}
++	}
++	}
++
++	if (0) {
++config_failed:
++		nm_vpn_plugin_failure (NM_VPN_PLUGIN (nm_plugin), NM_VPN_PLUGIN_FAILURE_CONNECT_FAILED);
++		g_warning ("%s %d (%s) CONFIG FAILED!", __FILE__, __LINE__, __func__);
++	}
++
++	nm_vpn_plugin_set_state (NM_VPN_PLUGIN (nm_plugin), NM_VPN_SERVICE_STATE_STOPPED);
++	ikei.detach();
++
++	log( STATUS_INFO, "detached from key daemon ...\n" );
++
++	//
++	// ---------- UPDATE STATE ----------
++	//
++
++	cstate = IKEC_STATE_DISCONNECTED;
++	set_state();
++
++	return 0;
++}
++
++static void
++quit_mainloop (NMIKECPlugin *plugin, gpointer user_data)
++{
++	g_main_loop_quit ((GMainLoop *) user_data);
++}
++
++
++int main (int argc, char *argv[])
++{
++	NMIKECPlugin *plugin;
++	NMIKECPluginPrivate *priv;
++	GMainLoop *main_loop;
++	IKEC_NM ikec;
++
++	signal( SIGPIPE, SIG_IGN );
++
++	g_type_init ();
++
++	plugin = nm_ikec_plugin_new ();
++	if (!plugin)
++		exit (EXIT_FAILURE);
++	priv = NM_IKEC_PLUGIN_GET_PRIVATE (plugin);
++
++	priv->ikec = &ikec;
++	ikec.nm_plugin = plugin;
++
++	main_loop = g_main_loop_new (NULL, FALSE);
++
++	g_signal_connect (plugin, "quit",
++			G_CALLBACK (quit_mainloop),
++			main_loop);
++
++	g_main_loop_run (main_loop);
++
++	g_main_loop_unref (main_loop);
++	g_object_unref (plugin);
++
++	exit (EXIT_SUCCESS);
++}
++
++#if 0
++static void
++print_one_property (const char *key, const char *value, gpointer user_data)
++{
++	g_warning("%d: key: '%s', value: '%s'", __LINE__, key, value);
++}
++#endif
++
++
++bool _IKEC_NM::get_username()
++{
++	nm_setting_set_secret_flags (NM_SETTING (s_vpn), NM_IKEC_KEY_XAUTH_USER, NM_SETTING_SECRET_FLAG_NOT_SAVED, NULL);
++	const char *ret = nm_setting_vpn_get_secret (s_vpn, NM_IKEC_KEY_XAUTH_USER);
++	if (!ret || !ret[0]) {
++		return false;
++	}
++	username.set(ret, strlen(ret) + 1);
++	return true;
++}
++
++bool _IKEC_NM::get_password()
++{
++	nm_setting_set_secret_flags (NM_SETTING (s_vpn), NM_IKEC_KEY_XAUTH_PASSWD, NM_SETTING_SECRET_FLAG_NOT_SAVED, NULL);
++	const char *ret = nm_setting_vpn_get_secret (s_vpn, NM_IKEC_KEY_XAUTH_PASSWD);
++	if (!ret || !ret[0]) {
++		return false;
++	}
++	password.set(ret, strlen(ret) + 1);
++	return true;
++}
++
++bool _IKEC_NM::get_filepass( void )
++{
++//	log( 0, "file password required for %s\n", path.text() );
++	return false;
++}
++
++bool _IKEC_NM::set_state()
++{
++	switch( cstate )
++	{
++		case IKEC_STATE_DISCONNECTED:
++			log( 0, "disconnected\n" );
++			break;
++
++		case IKEC_STATE_CONNECTING:
++			log( 0, "connecting\n" );
++			break;
++
++		case IKEC_STATE_CONNECTED:
++			log( 0, "connected\n" );
++			break;
++
++		case IKEC_STATE_DISCONNECTING:
++			log( 0, "disconnecting\n" );
++			break;
++	}
++
++	return true;
++}
++
++bool _IKEC_NM::set_stats()
++{
++	return true;
++}
++
++bool _IKEC_NM::set_status( long & status, BDATA & text )
++{
++	switch( status )
++	{
++		case STATUS_CONNECTED:
++			log( status, "tunnel enabled\n" );
++			break;
++
++		case STATUS_DISCONNECTED:
++			log( status, "tunnel disabled\n" );
++			break;
++
++		case STATUS_BANNER:
++			nm_vpn_plugin_set_login_banner (NM_VPN_PLUGIN (nm_plugin), text.text());
++			log( status, "login banner \n\n%s\n",
++				 text.text() );
++			break;
++
++		case STATUS_FAIL:
++			log( status, "Failure: %s\n",
++				 text.text() );
++			if (!strcasecmp(text.text(), "user authentication error")) {
++				nm_vpn_plugin_failure (NM_VPN_PLUGIN (nm_plugin), NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED);
++			} else {
++				nm_vpn_plugin_failure (NM_VPN_PLUGIN (nm_plugin), NM_VPN_PLUGIN_FAILURE_CONNECT_FAILED);
++			}
++			break;
++
++		default:
++			log( status, "%s", text.text() );
++	}
++	return true;
++}
++
++bool _IKEC_NM::log( long code, const char * format, ... )
++{
++	switch( code )
++	{
++		case STATUS_INFO:
++			printf( "%s", ">> : " );
++			break;
++
++		case STATUS_WARN:
++			printf( "%s", "ww : " );
++			break;
++
++		case STATUS_FAIL:
++			printf( "%s", "!! : " );
++			break;
++
++		default:
++			printf( "%s", "ii : " );
++			break;
++	}
++
++	va_list list;
++	va_start( list, format );
++	vfprintf( stdout, format, list );
++	fflush (stdout);
++
++	return true;
++}
+--- /dev/null
++++ ike-2.2.1+dfsg/source/nm-ikec/ikec.h
+@@ -0,0 +1,254 @@
++
++/*
++ * Copyright (c) 2007
++ *      Shrew Soft Inc.  All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Redistributions in any form must be accompanied by information on
++ *    how to obtain complete source code for the software and any
++ *    accompanying software that uses the software.  The source code
++ *    must either be included in the distribution or be available for no
++ *    more than the cost of distribution plus a nominal fee, and must be
++ *    freely redistributable under reasonable conditions.  For an
++ *    executable file, complete source code means the source code for all
++ *    modules it contains.  It does not include source code for modules or
++ *    files that typically accompany the major components of the operating
++ *    system on which the executable file runs.
++ *
++ * THIS SOFTWARE IS PROVIDED BY SHREW SOFT INC ``AS IS'' AND ANY EXPRESS
++ * OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
++ * WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, OR
++ * NON-INFRINGEMENT, ARE DISCLAIMED.  IN NO EVENT SHALL SHREW SOFT INC
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ *
++ * AUTHOR : Matthew Grooms
++ *          mgrooms@shrew.net
++ *
++ */
++
++#ifndef _IKEC_H_
++#define _IKEC_H_
++
++#include <unistd.h>
++#include <signal.h>
++#include <pwd.h>
++#include <stdarg.h>
++#include <netdb.h>
++#include <netinet/in.h>
++#include <sys/socket.h>
++#include <nm-setting-vpn.h>
++#include <nm-utils.h>
++#include <nm-vpn-plugin.h>
++
++
++#include "libike.h"
++#include "config.h"
++#include "version.h"
++
++#define NM_TYPE_IKEC_PLUGIN            (nm_ikec_plugin_get_type ())
++#define NM_IKEC_PLUGIN(obj)            (G_TYPE_CHECK_INSTANCE_CAST ((obj), NM_TYPE_IKEC_PLUGIN, NMIKECPlugin))
++#define NM_IKEC_PLUGIN_CLASS(klass)    (G_TYPE_CHECK_CLASS_CAST ((klass), NM_TYPE_IKEC_PLUGIN, NMIKECPluginClass))
++#define NM_IS_IKEC_PLUGIN(obj)         (G_TYPE_CHECK_INSTANCE_TYPE ((obj), NM_TYPE_IKEC_PLUGIN))
++#define NM_IS_IKEC_PLUGIN_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE ((obj), NM_TYPE_IKEC_PLUGIN))
++#define NM_IKEC_PLUGIN_GET_CLASS(obj)  (G_TYPE_INSTANCE_GET_CLASS ((obj), NM_TYPE_IKEC_PLUGIN, NMIKECPluginClass))
++
++#define NM_DBUS_SERVICE_IKEC    "org.freedesktop.NetworkManager.ikec"
++#define NM_DBUS_INTERFACE_IKEC  "org.freedesktop.NetworkManager.ikec"
++#define NM_DBUS_PATH_IKEC       "/org/freedesktop/NetworkManager/ikec"
++
++//#define NM_IKEC_KEY_XX			"XX"
++#define NM_IKEC_KEY_NETWORK_HOST				"network-host"
++#define NM_IKEC_KEY_NETWORK_IKE_PORT			"network-ike-port"
++#define NM_IKEC_KEY_CLIENT_AUTO_MODE			"client-auto-mode"
++#define NM_IKEC_KEY_NETWORK_NATT_MODE			"network-natt-mode"
++#define NM_IKEC_KEY_NETWORK_NATT_PORT			"network-natt-port"
++#define NM_IKEC_KEY_NETWORK_NATT_RATE			"network-natt-rate"
++#define NM_IKEC_KEY_NETWORK_FRAG_MODE			"network-frag-mode"
++#define NM_IKEC_KEY_NETWORK_FRAG_SIZE			"network-frag-size"
++#define NM_IKEC_KEY_NETWORK_DPD_ENABLE			"network-dpd-enable"
++#define NM_IKEC_KEY_NETWORK_NOTIFY_ENABLE		"network-notify-enable"
++#define NM_IKEC_KEY_CLIENT_BANNER_ENABLE		"client-banner-enable"
++#define NM_IKEC_KEY_IDENT_CLIENT_TYPE			"ident-client-type"
++#define NM_IKEC_KEY_IDENT_SERVER_TYPE			"ident-server-type"
++#define NM_IKEC_KEY_PHASE1_EXCHANGE				"phase1-exchange"
++#define NM_IKEC_KEY_PHASE1_CIPHER				"phase1-cipher"
++#define NM_IKEC_KEY_PHASE1_KEYLEN				"phase1-keylen"
++#define NM_IKEC_KEY_PHASE1_HASH					"phase1-hash"
++#define NM_IKEC_KEY_PHASE1_DHGROUP				"phase1-dhgroup"
++#define NM_IKEC_KEY_AUTH_METHOD					"auth-method"
++#define NM_IKEC_KEY_PHASE1_LIFE_SECS			"phase1-life-secs"
++#define NM_IKEC_KEY_PHASE1_LIFE_KBYTES			"phase1-life-kbytes"
++#define NM_IKEC_KEY_PHASE2_TRANSFORM			"phase2-transform"
++#define NM_IKEC_KEY_PHASE2_KEYLEN				"phase2-keylen"
++#define NM_IKEC_KEY_PHASE2_HMAC					"phase2-hmac"
++#define NM_IKEC_KEY_PHASE2_PFSGROUP				"phase2-pfsgroup"
++#define NM_IKEC_KEY_PHASE2_LIFE_SECS			"phase2-life-secs"
++#define NM_IKEC_KEY_PHASE2_LIFE_KBYTES			"phase2-life-kbytes"
++#define NM_IKEC_KEY_IPCOMP_TRANSFORM			"ipcomp-transform"
++#define NM_IKEC_KEY_CLIENT_IFACE				"client-iface"
++#define NM_IKEC_KEY_CLIENT_ADDR_AUTO			"client-addr-auto"
++#define NM_IKEC_KEY_CLIENT_IP_ADDR				"client-ip-addr"
++#define NM_IKEC_KEY_CLIENT_IP_MASK				"client-ip-mask"
++#define NM_IKEC_KEY_NETWORK_MTU_SIZE			"network-mtu-size"
++#define NM_IKEC_KEY_NETWORK_UPDOWN_SCRIPT		"network-updown-script"
++#define NM_IKEC_KEY_NETWORK_UPDOWN_DNS			"network-updown-dns"
++#define NM_IKEC_KEY_CLIENT_WINS_ENABLE			"client-wins-enable"
++#define NM_IKEC_KEY_CLIENT_WINS_AUTO			"client-wins-auto"
++#define NM_IKEC_KEY_CLIENT_WINS_ADDR			"client-wins-addr"
++#define NM_IKEC_KEY_CLIENT_DNS_USED				"client-dns-used"
++#define NM_IKEC_KEY_CLIENT_DNS_AUTO				"client-dns-auto"
++#define NM_IKEC_KEY_CLIENT_DNS_ADDR				"client-dns-addr"
++#define NM_IKEC_KEY_CLIENT_DNS_SUFFIX_AUTO		"client-dns-suffix-auto"
++#define NM_IKEC_KEY_CLIENT_DNS_SUFFIX			"client-dns-suffix"
++#define NM_IKEC_KEY_POLICY_LEVEL				"policy-level"
++#define NM_IKEC_KEY_POLICY_NAILED				"policy-nailed"
++#define NM_IKEC_KEY_POLICY_LIST_AUTO			"policy-list-auto"
++#define NM_IKEC_KEY_VENDOR_CHKPT_ENABLE			"vendor-chkpt-enable"
++#define NM_IKEC_KEY_IDENT_CLIENT_DATA			"ident-client-data"
++#define NM_IKEC_KEY_IDENT_SERVER_DATA			"ident-server-data"
++#define NM_IKEC_KEY_AUTH_SERVER_CERT			"auth-server-cert"
++#define NM_IKEC_KEY_AUTH_SERVER_CERT_NAME		"auth-server-cert-name"
++#define NM_IKEC_KEY_AUTH_SERVER_CERT_DATA		"auth-server-cert-data"
++#define NM_IKEC_KEY_AUTH_CLIENT_CERT			"auth-client-cert"
++#define NM_IKEC_KEY_AUTH_CLIENT_CERT_NAME		"auth-client-cert-name"
++#define NM_IKEC_KEY_AUTH_CLIENT_CERT_DATA		"auth-client-cert-data"
++#define NM_IKEC_KEY_AUTH_CLIENT_KEY			"auth-client-key"
++#define NM_IKEC_KEY_AUTH_CLIENT_KEY_NAME		"auth-client-key-name"
++#define NM_IKEC_KEY_AUTH_CLIENT_KEY_DATA		"auth-client-key-data"
++#define NM_IKEC_KEY_AUTH_MUTUAL_PSK				"auth-mutual-psk"
++#define NM_IKEC_KEY_CLIENT_SPLITDNS_LIST		"client-splitdns-list"
++#define NM_IKEC_KEY_POLICY_LIST_EXCLUDE			"policy-list-exclude"
++#define NM_IKEC_KEY_POLICY_LIST_INCLUDE			"policy-list-include"
++#define NM_IKEC_KEY_XAUTH_USER					"xauth-user"
++#define NM_IKEC_KEY_XAUTH_PASSWD				"xauth-passwd"
++
++#define NM_IKEC_NATT_MODE_ENABLE				"enable"
++#define NM_IKEC_NATT_MODE_DISABLE				"disable"
++#define NM_IKEC_NATT_MODE_FORCE_DRAFT			"force-draft"
++#define NM_IKEC_NATT_MODE_FORCE_RFC				"force-rfc"
++#define NM_IKEC_NATT_MODE_FORCE_CISCO_UDP		"force-cisco-udp"
++
++#define NM_IKEC_CONFIG_MODE_PUSH				"push"
++#define NM_IKEC_CONFIG_MODE_PULL				"pull"
++#define NM_IKEC_CONFIG_MODE_DHCP				"dhcp"
++
++
++enum IKEC_STATE
++{
++	IKEC_STATE_DISCONNECTED,
++	IKEC_STATE_CONNECTING,
++	IKEC_STATE_CONNECTED,
++	IKEC_STATE_DISCONNECTING
++};
++
++struct NMIKECPluginPrivate_s;
++struct NMIKECPlugin_s;
++
++typedef class _IKEC : public ITH_EXEC
++{
++	protected:
++
++	ITH_COND	connecting;
++
++	IKE_PEER	peer;
++	IKE_XCONF       xconf;
++	IKE_PROPOSAL    proposal_isakmp;
++	IKE_PROPOSAL    proposal_esp;
++	IKE_PROPOSAL    proposal_ipcomp;
++	IKEI		ikei;
++	IKEI_STATS	stats;
++
++	BDATA	sites;
++	BDATA	fspec;
++	BDATA	fpath;
++	BDATA	fpass;
++	BDATA	username;
++	BDATA	password;
++
++	virtual bool	get_username() = 0;
++	virtual bool	get_password() = 0;
++	virtual bool	get_filepass( void ) = 0;
++
++	virtual bool	set_state() = 0;
++	virtual bool	set_stats() = 0;
++	virtual bool	set_status( long & status, BDATA & text ) = 0;
++
++	virtual long	func( void * ) = 0;
++
++	CONFIG		config;
++	IKEC_STATE	cstate;
++
++	public:
++
++	_IKEC();
++	virtual ~_IKEC();
++
++	bool		load( BDATA & name );
++
++	IKEC_STATE	state();
++	virtual bool		connect(NMVPNPlugin *plugin, NMConnection *connection, GError **error, bool wait_input) = 0;
++	bool		disconnect(GError **error);
++
++	virtual bool	log( long code, const char * format, ... ) = 0;
++} IKEC;
++
++typedef class _IKEC_NM : public _IKEC
++{
++	protected:
++
++	virtual bool get_username();
++	virtual bool get_password();
++	virtual bool get_filepass( void);
++
++	virtual bool set_state();
++	virtual bool set_stats();
++	virtual bool set_status( long & status, BDATA & text );
++
++	long	func( void * );
++
++	public:
++
++	_IKEC_NM() {
++	};
++	~_IKEC_NM() {
++	};
++
++	virtual bool log( long code, const char * format, ... );
++	bool		connect(NMVPNPlugin *plugin, NMConnection *connection, GError **error, bool wait_input);
++
++	bool read_key( char & value );
++	bool read_str( BDATA & value );
++	bool read_pwd( BDATA & value, const char * prompt );
++	void show_stats();
++	struct NMIKECPlugin_s *nm_plugin;
++	NMSettingVPN *s_vpn;
++	NMConnection *nm_connection;
++} IKEC_NM;
++
++typedef struct NMIKECPlugin_s {
++	NMVPNPlugin parent;
++} NMIKECPlugin;
++
++typedef struct {
++	NMVPNPluginClass parent;
++} NMIKECPluginClass;
++
++typedef struct NMIKECPluginPrivate_s {
++	IKEC_NM *ikec;
++} NMIKECPluginPrivate;
++
++
++#endif
+--- /dev/null
++++ ike-2.2.1+dfsg/source/nm-ikec/nm-ikec-auth-dialog
+@@ -0,0 +1,89 @@
++#! /usr/bin/perl -W
++use strict;
++
++#my $log = new IO::File "/tmp/ikec-dialog.log", "a";
++#die "Unable to open log! $!" if (!defined($log));
++#$log->print(asctime(localtime()) . "\n");
++#$log->print(Dumper(\@ARGV));
++
++$ENV{'TERM'} = '' if (!defined($ENV{'TERM'}));
++
++
++use Getopt::Long;
++use UI::Dialog;
++
++use Net::DBus qw(:typing);
++
++use Data::Dumper;
++use IO::File;
++use POSIX;
++
++my (%opts);
++my (%secrets);
++my (%data);
++
++GetOptions("uuid|u=s" => \$opts{u}, "name|n=s" => \$opts{n}, "service|s=s" => \$opts{s}, "interactive|i" => \$opts{i}, "external-ui-mode" => \$opts{external});
++exit(1) if (!defined($opts{u}));
++#$log->print(Dumper(\%opts));
++
++my $bus = Net::DBus->system;
++my $nm = $bus->get_service('org.freedesktop.NetworkManager');
++my $setting_id = $nm->get_object('/org/freedesktop/NetworkManager/Settings', 'org.freedesktop.NetworkManager.Settings')->GetConnectionByUuid($opts{u});
++my $con_settings = Net::DBus::RemoteObject->new($nm, $setting_id);
++
++my $settings = $con_settings->GetSettings();
++$settings->{'vpn'}->{'data'}->{'xauth-user-flags'} = 2;
++$settings->{'vpn'}->{'data'}->{'xauth-passwd-flags'} = 2;
++delete $settings->{'ipv4'};
++delete $settings->{'ipv6'};
++$settings->{'connection'}->{'timestamp'} = dbus_int32($settings->{'connection'}->{'timestamp'});
++$con_settings->Update($settings);
++
++while (<>) {
++#    $log->print($_);
++    if ($_ =~ /^DONE/) {
++	last;
++    }
++}
++
++if (defined($opts{external}) && $opts{external}) {
++#    $log->print("Doing external mode!\n");
++    print "[VPN Plugin UI]\n";
++    print "Version=2\n";
++    print "Description=You need to authenticate to access the Virtual Private Network '$opts{n}'.\n";
++    print "Title=Authenticate VPN\n";
++    print "\n";
++    print "[xauth-user]\n";
++    print "Value=\n";
++    print "Label=Username:\n";
++    print "IsSecret=false\n";
++    print "ShouldAsk=true\n";
++    print "\n";
++    print "[xauth-passwd]\n";
++    print "Value=\n";
++    print "Label=Password:\n";
++    print "IsSecret=true\n";
++    print "ShouldAsk=true\n";
++} elsif (defined($opts{i}) && $opts{i}) {
++    my ($d, $ret, $username, $passwd);
++
++    $d = UI::Dialog->new(title => 'VPN data.');
++    $ret = $d->inputbox(text => "Username for $opts{n}:");
++    if (!$ret) {
++    #    $log->print("Unable to get username.\n");
++	exit(1);
++    }
++    $username = $d->rs();
++    $ret = $d->password(text => "Password for $username\@$opts{n}:");
++    if (!$ret) {
++    #    $log->print("Unable to get password.\n");
++	exit(1);
++    }
++    $passwd = $d->rs();
++    print "xauth-user\n";
++    print "$username\n";
++    print "xauth-passwd\n";
++    print "$passwd\n";
++    print "\n";
++    print "\n";
++}
+--- /dev/null
++++ ike-2.2.1+dfsg/source/nm-ikec/nm-ikec-props.cpp
+@@ -0,0 +1,622 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/***************************************************************************
++ * CVSID: $Id: nm-ikec.c 4366 2008-12-06 00:19:59Z dcbw $
++ *
++ * nm-ikec.c : GNOME UI dialogs for configuring ikec VPN connections
++ *
++ * Copyright (C) 2005 David Zeuthen, <davidz@redhat.com>
++ * Copyright (C) 2005 - 2008 Dan Williams, <dcbw@redhat.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ **************************************************************************/
++
++#ifdef HAVE_CONFIG_H
++#include <config.h>
++#endif
++
++#include <netinet/in.h>
++#include <arpa/inet.h>
++#include <errno.h>
++#include <stdlib.h>
++#include <string.h>
++#include <gtk/gtk.h>
++#include "nm-ikec-props.h"
++#include "ikec.h"
++
++#define NM_VPN_API_SUBJECT_TO_CHANGE
++#define GLADEDIR	"/usr/share/gnome-vpn-properties/ikec/"
++
++extern "C" {
++#define export export_to_file
++#define import import_from_file
++
++#include <nm-vpn-plugin-ui-interface.h>
++#include <nm-setting-vpn.h>
++#include <nm-setting-connection.h>
++#include <nm-setting-ip4-config.h>
++}
++
++#define IKEC_PLUGIN_NAME    ("Shrew Soft IKE VPN Client (ikec)")
++#define IKEC_PLUGIN_DESC    ("Compatible with various IPSec-based VPN gateways.")
++#define IKEC_PLUGIN_SERVICE NM_DBUS_SERVICE_IKEC
++
++#define ENC_TYPE_SECURE 0
++#define ENC_TYPE_WEAK   1
++#define ENC_TYPE_NONE   2
++
++#define PW_TYPE_SAVE   0
++#define PW_TYPE_ASK	   1
++#define PW_TYPE_UNUSED 2
++
++/************** plugin class **************/
++
++static void ikec_plugin_ui_interface_init (NMVpnPluginUiInterface *iface_class);
++
++G_DEFINE_TYPE_EXTENDED (IkecPluginUi, ikec_plugin_ui, G_TYPE_OBJECT, 0,
++						G_IMPLEMENT_INTERFACE (NM_TYPE_VPN_PLUGIN_UI_INTERFACE,
++											   ikec_plugin_ui_interface_init))
++
++/************** UI widget class **************/
++
++static void ikec_plugin_ui_widget_interface_init (NMVpnPluginUiWidgetInterface *iface_class);
++
++G_DEFINE_TYPE_EXTENDED (IkecPluginUiWidget, ikec_plugin_ui_widget, G_TYPE_OBJECT, 0,
++						G_IMPLEMENT_INTERFACE (NM_TYPE_VPN_PLUGIN_UI_WIDGET_INTERFACE,
++											   ikec_plugin_ui_widget_interface_init))
++
++#define IKEC_PLUGIN_UI_WIDGET_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), IKEC_TYPE_PLUGIN_UI_WIDGET, IkecPluginUiWidgetPrivate))
++
++typedef struct {
++	GtkBuilder *builder;
++	GtkWidget *widget;
++	GtkSizeGroup *group;
++	gint orig_dpd_timeout;
++} IkecPluginUiWidgetPrivate;
++
++
++#define IKEC_PLUGIN_UI_ERROR ikec_plugin_ui_error_quark ()
++
++static GQuark
++ikec_plugin_ui_error_quark (void)
++{
++	static GQuark error_quark = 0;
++
++	if (G_UNLIKELY (error_quark == 0))
++		error_quark = g_quark_from_static_string ("ikec-plugin-ui-error-quark");
++
++	return error_quark;
++}
++
++/* This should really be standard. */
++#define ENUM_ENTRY(NAME, DESC) { NAME, "" #NAME "", DESC }
++
++GType
++ikec_plugin_ui_error_get_type (void)
++{
++	static GType etype = 0;
++
++	if (etype == 0) {
++		static const GEnumValue values[] = {
++			/* Unknown error. */
++			ENUM_ENTRY (IKEC_PLUGIN_UI_ERROR_UNKNOWN, "UnknownError"),
++			/* The specified property was invalid. */
++			ENUM_ENTRY (IKEC_PLUGIN_UI_ERROR_INVALID_PROPERTY, "InvalidProperty"),
++			/* The specified property was missing and is required. */
++			ENUM_ENTRY (IKEC_PLUGIN_UI_ERROR_MISSING_PROPERTY, "MissingProperty"),
++			/* The connection was missing invalid. */
++			ENUM_ENTRY (IKEC_PLUGIN_UI_ERROR_INVALID_CONNECTION, "InvalidConnection"),
++			{ 0, 0, 0 }
++		};
++		etype = g_enum_register_static ("IkecPluginUiError", values);
++	}
++	return etype;
++}
++
++
++static gboolean
++check_validity (IkecPluginUiWidget *self, GError **error)
++{
++	IkecPluginUiWidgetPrivate *priv = IKEC_PLUGIN_UI_WIDGET_GET_PRIVATE (self);
++	GtkWidget *widget;
++	char *str;
++
++	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "gateway_entry"));
++	str = (char *) gtk_entry_get_text (GTK_ENTRY (widget));
++	fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++	if (!str || !strlen (str) || strstr (str, " ") || strstr (str, "\t")) {
++		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++		g_set_error (error,
++		             IKEC_PLUGIN_UI_ERROR,
++		             IKEC_PLUGIN_UI_ERROR_INVALID_PROPERTY,
++		             NM_IKEC_KEY_NETWORK_HOST);
++		return FALSE;
++	}
++
++	return TRUE;
++}
++
++static void
++stuff_changed_cb (GtkWidget *widget, gpointer user_data)
++{
++	g_signal_emit_by_name (IKEC_PLUGIN_UI_WIDGET (user_data), "changed");
++}
++
++static gboolean
++init_plugin_ui (IkecPluginUiWidget *self, NMConnection *connection, GError **error)
++{
++	IkecPluginUiWidgetPrivate *priv = IKEC_PLUGIN_UI_WIDGET_GET_PRIVATE (self);
++	NMSettingVPN *s_vpn;
++	GtkWidget *widget;
++	GtkListStore *store;
++	GtkTreeIter iter;
++	const char *value = NULL;
++	int active = -1;
++	const char *natt_mode = NULL;
++
++	s_vpn = (NMSettingVPN *) nm_connection_get_setting (connection, NM_TYPE_SETTING_VPN);
++	g_warning ("(%d): self: %p, s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, connection: %p", __LINE__, self, s_vpn, NM_IS_SETTING_VPN (s_vpn), connection);
++
++	priv->group = gtk_size_group_new (GTK_SIZE_GROUP_HORIZONTAL);
++
++	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "gateway_entry"));
++	g_return_val_if_fail (widget != NULL, FALSE);
++	gtk_size_group_add_widget (priv->group, GTK_WIDGET (widget));
++	if (s_vpn) {
++		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++		value = nm_setting_vpn_get_data_item (s_vpn, NM_IKEC_KEY_NETWORK_HOST);
++		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++		if (value && strlen (value))
++			gtk_entry_set_text (GTK_ENTRY (widget), value);
++	}
++	g_signal_connect (G_OBJECT (widget), "changed", G_CALLBACK (stuff_changed_cb), self);
++
++	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "gateway_port"));
++	g_return_val_if_fail (widget != NULL, FALSE);
++	gtk_size_group_add_widget (priv->group, GTK_WIDGET (widget));
++	if (s_vpn) {
++		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++		value = nm_setting_vpn_get_data_item (s_vpn, NM_IKEC_KEY_NETWORK_IKE_PORT);
++		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++		if (value && strlen (value))
++			gtk_entry_set_text (GTK_ENTRY (widget), value);
++	}
++	g_signal_connect (G_OBJECT (widget), "changed", G_CALLBACK (stuff_changed_cb), self);
++
++
++	active = -1;
++	store = gtk_list_store_new (2, G_TYPE_STRING, G_TYPE_STRING);
++	if (s_vpn)
++		natt_mode = nm_setting_vpn_get_data_item (s_vpn, NM_IKEC_KEY_NETWORK_NATT_MODE);
++
++	#define add_list_item(store, iter, natt_mode, name, label, set_active)	{ \
++		gtk_list_store_append((store), (iter)); \
++		gtk_list_store_set ((store), (iter), 0, (name), 1, (label), -1); \
++		if ((active < 0) && (natt_mode)) { \
++			if (!strcmp ((natt_mode) , (label))) { \
++				active = set_active; } \
++			} \
++		}
++
++	add_list_item(store, &iter, natt_mode, "Enable (default)", NM_IKEC_NATT_MODE_ENABLE, 0);
++	add_list_item(store, &iter, natt_mode, "Force Draft", NM_IKEC_NATT_MODE_FORCE_DRAFT, 1);
++	add_list_item(store, &iter, natt_mode, "Force RFC", NM_IKEC_NATT_MODE_FORCE_RFC, 2);
++	add_list_item(store, &iter, natt_mode, "Cisco UDP", NM_IKEC_NATT_MODE_FORCE_CISCO_UDP, 3);
++	add_list_item(store, &iter, natt_mode, "Disable", NM_IKEC_NATT_MODE_DISABLE, 4);
++
++	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "natt_combo"));
++	g_return_val_if_fail (widget != NULL, FALSE);
++	gtk_size_group_add_widget (priv->group, GTK_WIDGET (widget));
++	gtk_combo_box_set_model (GTK_COMBO_BOX (widget), GTK_TREE_MODEL (store));
++	g_object_unref (store);
++	gtk_combo_box_set_active (GTK_COMBO_BOX (widget), active < 0 ? 0 : active);
++	g_signal_connect (G_OBJECT (widget), "changed", G_CALLBACK (stuff_changed_cb), self);
++
++	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "disable_dpd_checkbutton"));
++	g_return_val_if_fail (widget != NULL, FALSE);
++	if (s_vpn) {
++		value = nm_setting_vpn_get_data_item (s_vpn, NM_IKEC_KEY_NETWORK_DPD_ENABLE);
++		if (value) {
++			long int tmp;
++
++			errno = 0;
++			tmp = strtol (value, NULL, 10);
++			if (tmp >= 0 && tmp <= G_MAXUINT32 && errno == 0)
++				priv->orig_dpd_timeout = (guint32) tmp;
++
++			if (priv->orig_dpd_timeout == 0)
++				gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (widget), TRUE);
++		}
++	}
++	g_signal_connect (G_OBJECT (widget), "toggled", G_CALLBACK (stuff_changed_cb), self);
++
++	return TRUE;
++}
++
++static GObject *
++get_widget (NMVpnPluginUiWidgetInterface *iface)
++{
++	IkecPluginUiWidget *self = IKEC_PLUGIN_UI_WIDGET (iface);
++	IkecPluginUiWidgetPrivate *priv = IKEC_PLUGIN_UI_WIDGET_GET_PRIVATE (self);
++
++	return G_OBJECT (priv->widget);
++}
++
++static gboolean
++update_connection (NMVpnPluginUiWidgetInterface *iface,
++                   NMConnection *connection,
++                   GError **error)
++{
++	IkecPluginUiWidget *self = IKEC_PLUGIN_UI_WIDGET (iface);
++	IkecPluginUiWidgetPrivate *priv = IKEC_PLUGIN_UI_WIDGET_GET_PRIVATE (self);
++	NMSettingVPN *s_vpn;
++	GtkWidget *widget;
++	char *str;
++	GtkTreeModel *model;
++	GtkTreeIter iter;
++	int new_setting = 0;
++
++	if (!check_validity (self, error))
++		return FALSE;
++
++	s_vpn = NM_SETTING_VPN (nm_connection_get_setting (connection, NM_TYPE_SETTING_VPN));
++	g_warning ("(%d): self: %p, s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, connection: %p", __LINE__, self, s_vpn, NM_IS_SETTING_VPN (s_vpn), connection);
++	if (!s_vpn || !NM_IS_SETTING_VPN(s_vpn)) {
++		s_vpn = NM_SETTING_VPN (nm_setting_vpn_new ());
++		g_warning ("(%d): s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, connection: %p", __LINE__, s_vpn, NM_IS_SETTING_VPN (s_vpn), connection);
++		new_setting = 1;
++	}
++	g_object_set (s_vpn, NM_SETTING_VPN_SERVICE_TYPE, NM_DBUS_SERVICE_IKEC, NULL);
++
++	/* Gateway */
++	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "gateway_entry"));
++	str = (char *) gtk_entry_get_text (GTK_ENTRY (widget));
++	if (str && strlen (str))
++		nm_setting_vpn_add_data_item (s_vpn, NM_IKEC_KEY_NETWORK_HOST, str);
++
++	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "gateway_port"));
++	str = (char *) gtk_entry_get_text (GTK_ENTRY (widget));
++	if (str && strlen (str))
++		nm_setting_vpn_add_data_item (s_vpn, NM_IKEC_KEY_NETWORK_IKE_PORT, str);
++
++	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "natt_combo"));
++	model = gtk_combo_box_get_model (GTK_COMBO_BOX (widget));
++	if (gtk_combo_box_get_active_iter (GTK_COMBO_BOX (widget), &iter)) {
++		const char *mode = NULL;
++
++		gtk_tree_model_get (model, &iter, 1, &mode, -1);
++		nm_setting_vpn_add_data_item (s_vpn, NM_IKEC_KEY_NETWORK_NATT_MODE, mode);
++	} else
++		nm_setting_vpn_add_data_item (s_vpn, NM_IKEC_KEY_NETWORK_NATT_MODE, NM_IKEC_NATT_MODE_ENABLE);
++
++	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "disable_dpd_checkbutton"));
++	if (gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (widget))) {
++		nm_setting_vpn_add_data_item (s_vpn, NM_IKEC_KEY_NETWORK_DPD_ENABLE, "0");
++	} else {
++		/* If DPD was disabled and now the user wishes to enable it, just
++		 * don't pass the DPD_IDLE_TIMEOUT option to ikec and thus use the
++		 * default DPD idle time.  Otherwise keep the original DPD idle timeout.
++		 */
++		if (priv->orig_dpd_timeout >= 10) {
++			char *tmp = g_strdup_printf ("%d", priv->orig_dpd_timeout);
++			nm_setting_vpn_add_data_item (s_vpn, NM_IKEC_KEY_NETWORK_DPD_ENABLE, tmp);
++			g_free (tmp);
++		}
++	}
++
++	g_warning ("(%d): s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, connection: %p", __LINE__, s_vpn, NM_IS_SETTING_VPN (s_vpn), connection);
++	if (new_setting) {
++		nm_connection_add_setting (connection, NM_SETTING (s_vpn));
++		g_warning ("(%d): s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, connection: %p", __LINE__, s_vpn, NM_IS_SETTING_VPN (s_vpn), connection);
++	}
++	return TRUE;
++}
++
++static NMVpnPluginUiWidgetInterface *
++nm_vpn_plugin_ui_widget_interface_new (NMConnection *connection, GError **error)
++{
++	NMVpnPluginUiWidgetInterface *object;
++	IkecPluginUiWidgetPrivate *priv;
++	char *ui_file;
++
++	fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++	if (error)
++		g_return_val_if_fail (*error == NULL, NULL);
++
++	fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++	object = NM_VPN_PLUGIN_UI_WIDGET_INTERFACE (g_object_new (IKEC_TYPE_PLUGIN_UI_WIDGET, NULL));
++	fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++	if (!object) {
++		g_set_error (error, IKEC_PLUGIN_UI_ERROR, 0, "could not create ikec object");
++		return NULL;
++	}
++
++	fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++	priv = IKEC_PLUGIN_UI_WIDGET_GET_PRIVATE (object);
++	fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++
++	ui_file = g_strdup_printf ("%s/%s", GLADEDIR, "nm-ikec-props.ui");
++	fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++	priv->builder = gtk_builder_new ();
++	fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++	if (!gtk_builder_add_from_file (priv->builder, ui_file, error)) {
++		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++		g_set_error (error, IKEC_PLUGIN_UI_ERROR, 0,
++		             "could not load required resources at %s", ui_file);
++		g_free (ui_file);
++		g_object_unref (object);
++		return NULL;
++	}
++		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++	g_free (ui_file);
++		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++
++	priv->widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "ikec-vbox"));
++		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++	if (!priv->widget) {
++		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++		g_set_error (error, IKEC_PLUGIN_UI_ERROR, 0, "could not load UI widget");
++		g_object_unref (object);
++		return NULL;
++	}
++		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++	g_object_ref_sink (priv->widget);
++		fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++
++	if (!init_plugin_ui (IKEC_PLUGIN_UI_WIDGET (object), connection, error)) {
++		g_object_unref (object);
++		return NULL;
++	}
++
++	return object;
++}
++
++static gboolean
++save_secrets (NMVpnPluginUiWidgetInterface *iface,
++              NMConnection *connection,
++			                GError **error)
++{
++	return TRUE;
++}
++
++static void
++dispose (GObject *object)
++{
++	IkecPluginUiWidget *plugin = IKEC_PLUGIN_UI_WIDGET (object);
++	IkecPluginUiWidgetPrivate *priv = IKEC_PLUGIN_UI_WIDGET_GET_PRIVATE (plugin);
++
++	if (priv->group)
++		g_object_unref (priv->group);
++
++	if (priv->widget)
++		g_object_unref (priv->widget);
++
++	if (priv->builder)
++		g_object_unref (priv->builder);
++
++	G_OBJECT_CLASS (ikec_plugin_ui_widget_parent_class)->dispose (object);
++}
++
++static void
++ikec_plugin_ui_widget_class_init (IkecPluginUiWidgetClass *req_class)
++{
++	GObjectClass *object_class = G_OBJECT_CLASS (req_class);
++
++	g_type_class_add_private (req_class, sizeof (IkecPluginUiWidgetPrivate));
++
++	object_class->dispose = dispose;
++}
++
++static void
++ikec_plugin_ui_widget_init (IkecPluginUiWidget *plugin)
++{
++}
++
++static void
++ikec_plugin_ui_widget_interface_init (NMVpnPluginUiWidgetInterface *iface_class)
++{
++	/* interface implementation */
++	iface_class->get_widget = get_widget;
++	iface_class->update_connection = update_connection;
++	iface_class->save_secrets = save_secrets;
++}
++
++static NMConnection *
++import_from_file (NMVpnPluginUiInterface *iface, const char *path, GError **error)
++{
++	NMConnection *connection;
++	NMSettingVPN *s_vpn;
++	CONFIG config;
++	const char *tmp;
++	bool need_certs = false;
++
++	fprintf (stderr, "%s %d (%s)\n", __FILE__, __LINE__, __func__);
++
++	tmp = strrchr(path, '.');
++	if (tmp && !strcasecmp(tmp, ".pcf") && !config.file_import_pcf (path, need_certs)) {
++		g_set_error (error, 0, 0, "does not look like a Cisco PCF VPN connection (parse failed)");
++		return NULL;
++	} else if (!config.file_read(path)) {
++		g_set_error (error, 0, 0, "does not look like a %s VPN connection (parse failed)",
++		             IKEC_PLUGIN_NAME);
++		return NULL;
++	}
++
++	connection = nm_connection_new ();
++	s_vpn = NM_SETTING_VPN (nm_setting_vpn_new ());
++	g_object_set (s_vpn, NM_SETTING_VPN_SERVICE_TYPE, NM_DBUS_SERVICE_IKEC, NULL);
++
++	CFGDAT * cfgdat;
++	for( long index = 0; index < config.count(); index++ )
++	{
++		cfgdat = static_cast<CFGDAT*>( config.get_entry( index ) );
++
++		if (!strcmp(cfgdat->key.text(), "version")) {
++			continue;
++		}
++		if (cfgdat->type == DATA_STRING) {
++			nm_setting_vpn_add_data_item (s_vpn, cfgdat->key.text(), cfgdat->vval.text());
++			fprintf (stderr, "%s %d (%s): %s: (%s)\n", __FILE__, __LINE__, __func__, cfgdat->key.text(), cfgdat->vval.text());
++		} else if (cfgdat->type == DATA_NUMBER) {
++			char buf[64] = {0};
++			snprintf(buf, sizeof(buf), "%li", cfgdat->nval);
++			fprintf (stderr, "%s %d (%s): %s: (%s)\n", __FILE__, __LINE__, __func__, cfgdat->key.text(), buf);
++			nm_setting_vpn_add_data_item (s_vpn, cfgdat->key.text(), buf);
++		} else if (cfgdat->type == DATA_BINARY) {
++			BDATA b64;
++			b64 = cfgdat->vval;
++			b64.base64_encode();
++			nm_setting_vpn_add_data_item (s_vpn, cfgdat->key.text(), b64.text());
++		}
++	}
++	g_warning ("(%d): s_vpn: %p, NM_IS_SETTING_VPN (s_vpn): %d, connection: %p", __LINE__, s_vpn, NM_IS_SETTING_VPN (s_vpn), connection);
++	nm_connection_add_setting (connection, NM_SETTING (s_vpn));
++
++	return connection;
++}
++
++static void
++add_one_property (const char *key, const char *value, gpointer user_data)
++{
++	CONFIG *config = (CONFIG *) user_data;
++
++	config->set_string(key, value, strlen (value));
++}
++
++static gboolean
++export_to_file (NMVpnPluginUiInterface *iface,
++        const char *path,
++        NMConnection *connection,
++        GError **error)
++{
++	NMSettingVPN *s_vpn;
++	CONFIG config;
++
++	s_vpn = (NMSettingVPN *) nm_connection_get_setting (connection, NM_TYPE_SETTING_VPN);
++
++    nm_setting_vpn_foreach_data_item (s_vpn, add_one_property, &config);
++
++	if (!config.file_write(path)) {
++		g_set_error (error, 0, 0, "could not write file");
++		return FALSE;
++	}
++
++	return TRUE;
++}
++
++static char *
++get_suggested_name (NMVpnPluginUiInterface *iface, NMConnection *connection)
++{
++	NMSettingConnection *s_con;
++	const char *id;
++
++	g_return_val_if_fail (connection != NULL, NULL);
++
++	s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
++	g_return_val_if_fail (s_con != NULL, NULL);
++
++	id = nm_setting_connection_get_id (s_con);
++	g_return_val_if_fail (id != NULL, NULL);
++
++	return g_strdup_printf ("%s.pcf", id);
++}
++
++static guint32
++get_capabilities (NMVpnPluginUiInterface *iface)
++{
++	return (NM_VPN_PLUGIN_UI_CAPABILITY_IMPORT | NM_VPN_PLUGIN_UI_CAPABILITY_EXPORT);
++}
++
++static gboolean
++delete_connection (NMVpnPluginUiInterface *iface,
++                   NMConnection *connection,
++                   GError **error)
++{
++	return TRUE;
++}
++
++static NMVpnPluginUiWidgetInterface *
++ui_factory (NMVpnPluginUiInterface *iface, NMConnection *connection, GError **error)
++{
++	return nm_vpn_plugin_ui_widget_interface_new (connection, error);
++}
++
++static void
++get_property (GObject *object, guint prop_id,
++			  GValue *value, GParamSpec *pspec)
++{
++	switch (prop_id) {
++	case NM_VPN_PLUGIN_UI_INTERFACE_PROP_NAME:
++		g_value_set_string (value, IKEC_PLUGIN_NAME);
++		break;
++	case NM_VPN_PLUGIN_UI_INTERFACE_PROP_DESC:
++		g_value_set_string (value, IKEC_PLUGIN_DESC);
++		break;
++	case NM_VPN_PLUGIN_UI_INTERFACE_PROP_SERVICE:
++		g_value_set_string (value, IKEC_PLUGIN_SERVICE);
++		break;
++	default:
++		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++		break;
++	}
++}
++
++static void
++ikec_plugin_ui_class_init (IkecPluginUiClass *req_class)
++{
++	GObjectClass *object_class = G_OBJECT_CLASS (req_class);
++
++	object_class->get_property = get_property;
++
++	g_object_class_override_property (object_class,
++									  NM_VPN_PLUGIN_UI_INTERFACE_PROP_NAME,
++									  NM_VPN_PLUGIN_UI_INTERFACE_NAME);
++
++	g_object_class_override_property (object_class,
++									  NM_VPN_PLUGIN_UI_INTERFACE_PROP_DESC,
++									  NM_VPN_PLUGIN_UI_INTERFACE_DESC);
++
++	g_object_class_override_property (object_class,
++									  NM_VPN_PLUGIN_UI_INTERFACE_PROP_SERVICE,
++									  NM_VPN_PLUGIN_UI_INTERFACE_SERVICE);
++}
++
++static void
++ikec_plugin_ui_init (IkecPluginUi *plugin)
++{
++}
++
++static void
++ikec_plugin_ui_interface_init (NMVpnPluginUiInterface *iface_class)
++{
++	/* interface implementation */
++	iface_class->ui_factory = ui_factory;
++	iface_class->get_capabilities = get_capabilities;
++	iface_class->import_from_file = import_from_file;
++	iface_class->export_to_file = export_to_file;
++	iface_class->get_suggested_name = get_suggested_name;
++	iface_class->delete_connection = delete_connection;
++}
++
++
++G_MODULE_EXPORT NMVpnPluginUiInterface *
++nm_vpn_plugin_ui_factory (GError **error)
++{
++	if (error)
++		g_return_val_if_fail (*error == NULL, NULL);
++
++	return NM_VPN_PLUGIN_UI_INTERFACE (g_object_new (IKEC_TYPE_PLUGIN_UI, NULL));
++}
++
+--- /dev/null
++++ ike-2.2.1+dfsg/source/nm-ikec/nm-ikec-props.glade
+@@ -0,0 +1,200 @@
++<?xml version="1.0" encoding="UTF-8" standalone="no"?>
++<!DOCTYPE glade-interface SYSTEM "glade-2.0.dtd">
++<!--*- mode: xml -*-->
++<glade-interface>
++  <widget class="GtkWindow" id="ikec-widget">
++    <property name="title" translatable="yes">window1</property>
++    <child>
++      <widget class="GtkVBox" id="ikec-vbox">
++        <property name="visible">True</property>
++        <property name="border_width">12</property>
++        <property name="spacing">16</property>
++        <child>
++          <widget class="GtkVBox" id="vbox8">
++            <property name="visible">True</property>
++            <property name="spacing">6</property>
++            <child>
++              <widget class="GtkLabel" id="label22">
++                <property name="visible">True</property>
++                <property name="xalign">0</property>
++                <property name="label" translatable="yes">&lt;b&gt;General&lt;/b&gt;</property>
++                <property name="use_markup">True</property>
++              </widget>
++              <packing>
++                <property name="expand">False</property>
++                <property name="fill">False</property>
++              </packing>
++            </child>
++            <child>
++              <widget class="GtkAlignment" id="alignment8">
++                <property name="visible">True</property>
++                <property name="left_padding">12</property>
++                <child>
++                  <widget class="GtkTable" id="table2">
++                    <property name="visible">True</property>
++                    <property name="n_rows">5</property>
++                    <property name="n_columns">3</property>
++                    <property name="column_spacing">6</property>
++                    <property name="row_spacing">6</property>
++                    <child>
++                      <placeholder/>
++                    </child>
++                    <child>
++                      <placeholder/>
++                    </child>
++                    <child>
++                      <placeholder/>
++                    </child>
++                    <child>
++                      <placeholder/>
++                    </child>
++                    <child>
++                      <widget class="GtkLabel" id="label23">
++                        <property name="visible">True</property>
++                        <property name="xalign">0</property>
++                        <property name="label" translatable="yes">_Gateway:</property>
++                        <property name="use_underline">True</property>
++                        <property name="mnemonic_widget">gateway_entry</property>
++                      </widget>
++                      <packing>
++                        <property name="x_options">GTK_FILL</property>
++                        <property name="y_options"></property>
++                      </packing>
++                    </child>
++                    <child>
++                      <widget class="GtkEntry" id="gateway_entry">
++                        <property name="visible">True</property>
++                        <property name="can_focus">True</property>
++                      </widget>
++                      <packing>
++                        <property name="left_attach">1</property>
++                        <property name="right_attach">2</property>
++                        <property name="y_options"></property>
++                      </packing>
++                    </child>
++                    <child>
++                      <widget class="GtkLabel" id="label24">
++                        <property name="visible">True</property>
++                        <property name="xalign">0</property>
++                        <property name="label" translatable="yes">_IKE Port:</property>
++                        <property name="use_underline">True</property>
++                        <property name="mnemonic_widget">gateway_port</property>
++                      </widget>
++                      <packing>
++                        <property name="x_options">GTK_FILL</property>
++                        <property name="y_options"></property>
++                        <property name="top_attach">1</property>
++                        <property name="bottom_attach">2</property>
++                      </packing>
++                    </child>
++                    <child>
++                      <widget class="GtkEntry" id="gateway_port">
++                        <property name="visible">True</property>
++                        <property name="can_focus">True</property>
++                      </widget>
++                      <packing>
++                        <property name="top_attach">1</property>
++                        <property name="bottom_attach">2</property>
++                        <property name="left_attach">1</property>
++                        <property name="right_attach">2</property>
++                        <property name="y_options"></property>
++                      </packing>
++                    </child>
++                  </widget>
++                </child>
++              </widget>
++              <packing>
++                <property name="position">1</property>
++              </packing>
++            </child>
++          </widget>
++          <packing>
++            <property name="expand">False</property>
++          </packing>
++        </child>
++        <child>
++          <widget class="GtkVBox" id="vbox11">
++            <property name="visible">True</property>
++            <property name="spacing">6</property>
++            <child>
++              <widget class="GtkLabel" id="label25">
++                <property name="visible">True</property>
++                <property name="xalign">0</property>
++                <property name="label" translatable="yes">&lt;b&gt;Optional&lt;/b&gt;</property>
++                <property name="use_markup">True</property>
++              </widget>
++              <packing>
++                <property name="expand">False</property>
++                <property name="fill">False</property>
++              </packing>
++            </child>
++            <child>
++              <widget class="GtkAlignment" id="alignment9">
++                <property name="visible">True</property>
++                <property name="left_padding">12</property>
++                <child>
++                  <widget class="GtkTable" id="table3">
++                    <property name="visible">True</property>
++                    <property name="n_rows">5</property>
++                    <property name="n_columns">2</property>
++                    <property name="column_spacing">6</property>
++                    <property name="row_spacing">6</property>
++                    <child>
++                      <placeholder/>
++                    </child>
++                    <child>
++                      <widget class="GtkCheckButton" id="disable_dpd_checkbutton">
++                        <property name="visible">True</property>
++                        <property name="can_focus">True</property>
++                        <property name="label" translatable="yes">Disable Dead Peer Detection</property>
++                        <property name="response_id">0</property>
++                        <property name="draw_indicator">True</property>
++                      </widget>
++                      <packing>
++                        <property name="left_attach">1</property>
++                        <property name="right_attach">2</property>
++                        <property name="top_attach">4</property>
++                        <property name="bottom_attach">5</property>
++                      </packing>
++                    </child>
++                    <child>
++                      <widget class="GtkLabel" id="label2">
++                        <property name="visible">True</property>
++                        <property name="xalign">0</property>
++                        <property name="label" translatable="yes">NAT traversal:</property>
++                      </widget>
++                      <packing>
++                        <property name="top_attach">3</property>
++                        <property name="bottom_attach">4</property>
++                      </packing>
++                    </child>
++                    <child>
++                      <widget class="GtkComboBox" id="natt_combo">
++                        <property name="visible">True</property>
++                        <property name="items" translatable="yes"> </property>
++                      </widget>
++                      <packing>
++                        <property name="left_attach">1</property>
++                        <property name="right_attach">2</property>
++                        <property name="top_attach">3</property>
++                        <property name="bottom_attach">4</property>
++                      </packing>
++                    </child>
++                  </widget>
++                </child>
++              </widget>
++              <packing>
++                <property name="position">1</property>
++              </packing>
++            </child>
++          </widget>
++          <packing>
++            <property name="expand">False</property>
++            <property name="fill">False</property>
++            <property name="position">1</property>
++          </packing>
++        </child>
++      </widget>
++    </child>
++  </widget>
++</glade-interface>
+--- /dev/null
++++ ike-2.2.1+dfsg/source/nm-ikec/nm-ikec-props.h
+@@ -0,0 +1,81 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/***************************************************************************
++ * nm-ikec.h : GNOME UI dialogs for configuring ikec VPN connections
++ *
++ * Copyright (C) 2008 Dan Williams, <dcbw@redhat.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ **************************************************************************/
++
++#ifndef _NM_IKEC_H_
++#define _NM_IKEC_H_
++
++#include <glib-object.h>
++
++typedef enum
++{
++	IKEC_PLUGIN_UI_ERROR_UNKNOWN = 0,
++	IKEC_PLUGIN_UI_ERROR_INVALID_PROPERTY,
++	IKEC_PLUGIN_UI_ERROR_MISSING_PROPERTY,
++	IKEC_PLUGIN_UI_ERROR_INVALID_CONNECTION
++} IkecPluginUiError;
++
++#define IKEC_TYPE_PLUGIN_UI_ERROR (ikec_plugin_ui_error_get_type ()) 
++GType ikec_plugin_ui_error_get_type (void);
++
++#define IKEC_TYPE_PLUGIN_UI            (ikec_plugin_ui_get_type ())
++#define IKEC_PLUGIN_UI(obj)            (G_TYPE_CHECK_INSTANCE_CAST ((obj), IKEC_TYPE_PLUGIN_UI, IkecPluginUi))
++#define IKEC_PLUGIN_UI_CLASS(klass)    (G_TYPE_CHECK_CLASS_CAST ((klass), IKEC_TYPE_PLUGIN_UI, IkecPluginUiClass))
++#define IKEC_IS_PLUGIN_UI(obj)         (G_TYPE_CHECK_INSTANCE_TYPE ((obj), IKEC_TYPE_PLUGIN_UI))
++#define IKEC_IS_PLUGIN_UI_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE ((obj), IKEC_TYPE_PLUGIN_UI))
++#define IKEC_PLUGIN_UI_GET_CLASS(obj)  (G_TYPE_INSTANCE_GET_CLASS ((obj), IKEC_TYPE_PLUGIN_UI, IkecPluginUiClass))
++
++typedef struct _IkecPluginUi IkecPluginUi;
++typedef struct _IkecPluginUiClass IkecPluginUiClass;
++
++struct _IkecPluginUi {
++	GObject parent;
++};
++
++struct _IkecPluginUiClass {
++	GObjectClass parent;
++};
++
++GType ikec_plugin_ui_get_type (void);
++
++
++#define IKEC_TYPE_PLUGIN_UI_WIDGET            (ikec_plugin_ui_widget_get_type ())
++#define IKEC_PLUGIN_UI_WIDGET(obj)            (G_TYPE_CHECK_INSTANCE_CAST ((obj), IKEC_TYPE_PLUGIN_UI_WIDGET, IkecPluginUiWidget))
++#define IKEC_PLUGIN_UI_WIDGET_CLASS(klass)    (G_TYPE_CHECK_CLASS_CAST ((klass), IKEC_TYPE_PLUGIN_UI_WIDGET, IkecPluginUiWidgetClass))
++#define IKEC_IS_PLUGIN_UI_WIDGET(obj)         (G_TYPE_CHECK_INSTANCE_TYPE ((obj), IKEC_TYPE_PLUGIN_UI_WIDGET))
++#define IKEC_IS_PLUGIN_UI_WIDGET_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE ((obj), IKEC_TYPE_PLUGIN_UI_WIDGET))
++#define IKEC_PLUGIN_UI_WIDGET_GET_CLASS(obj)  (G_TYPE_INSTANCE_GET_CLASS ((obj), IKEC_TYPE_PLUGIN_UI_WIDGET, IkecPluginUiWidgetClass))
++
++typedef struct _IkecPluginUiWidget IkecPluginUiWidget;
++typedef struct _IkecPluginUiWidgetClass IkecPluginUiWidgetClass;
++
++struct _IkecPluginUiWidget {
++	GObject parent;
++};
++
++struct _IkecPluginUiWidgetClass {
++	GObjectClass parent;
++};
++
++GType ikec_plugin_ui_widget_get_type (void);
++
++#endif	/* _NM_IKEC_H_ */
++
+--- /dev/null
++++ ike-2.2.1+dfsg/source/nm-ikec/nm-ikec-props.ui
+@@ -0,0 +1,214 @@
++<?xml version="1.0"?>
++<!--*- mode: xml -*-->
++<interface>
++  <object class="GtkListStore" id="model1">
++    <columns>
++      <column type="gchararray"/>
++    </columns>
++    <data>
++      <row>
++        <col id="0" translatable="yes"> </col>
++      </row>
++    </data>
++  </object>
++  <object class="GtkWindow" id="ikec-widget">
++    <property name="title" translatable="yes">window1</property>
++    <child>
++      <object class="GtkVBox" id="ikec-vbox">
++        <property name="visible">True</property>
++        <property name="border_width">12</property>
++        <property name="spacing">16</property>
++        <child>
++          <object class="GtkVBox" id="vbox8">
++            <property name="visible">True</property>
++            <property name="spacing">6</property>
++            <child>
++              <object class="GtkLabel" id="label22">
++                <property name="visible">True</property>
++                <property name="xalign">0</property>
++                <property name="label" translatable="yes">&lt;b&gt;General&lt;/b&gt;</property>
++                <property name="use_markup">True</property>
++              </object>
++              <packing>
++                <property name="expand">False</property>
++                <property name="fill">False</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkAlignment" id="alignment8">
++                <property name="visible">True</property>
++                <property name="left_padding">12</property>
++                <child>
++                  <object class="GtkTable" id="table2">
++                    <property name="visible">True</property>
++                    <property name="n_rows">5</property>
++                    <property name="n_columns">3</property>
++                    <property name="column_spacing">6</property>
++                    <property name="row_spacing">6</property>
++                    <child>
++                      <placeholder/>
++                    </child>
++                    <child>
++                      <placeholder/>
++                    </child>
++                    <child>
++                      <placeholder/>
++                    </child>
++                    <child>
++                      <placeholder/>
++                    </child>
++                    <child>
++                      <object class="GtkLabel" id="label23">
++                        <property name="visible">True</property>
++                        <property name="xalign">0</property>
++                        <property name="label" translatable="yes">_Gateway:</property>
++                        <property name="use_underline">True</property>
++                        <property name="mnemonic_widget">gateway_entry</property>
++                      </object>
++                      <packing>
++                        <property name="x_options">GTK_FILL</property>
++                        <property name="y_options"/>
++                      </packing>
++                    </child>
++                    <child>
++                      <object class="GtkEntry" id="gateway_entry">
++                        <property name="visible">True</property>
++                        <property name="can_focus">True</property>
++                      </object>
++                      <packing>
++                        <property name="left_attach">1</property>
++                        <property name="right_attach">2</property>
++                        <property name="y_options"/>
++                      </packing>
++                    </child>
++                    <child>
++                      <object class="GtkLabel" id="label24">
++                        <property name="visible">True</property>
++                        <property name="xalign">0</property>
++                        <property name="label" translatable="yes">_IKE Port:</property>
++                        <property name="use_underline">True</property>
++                        <property name="mnemonic_widget">gateway_port</property>
++                      </object>
++                      <packing>
++                        <property name="x_options">GTK_FILL</property>
++                        <property name="y_options"/>
++                        <property name="top_attach">1</property>
++                        <property name="bottom_attach">2</property>
++                      </packing>
++                    </child>
++                    <child>
++                      <object class="GtkEntry" id="gateway_port">
++                        <property name="visible">True</property>
++                        <property name="can_focus">True</property>
++                      </object>
++                      <packing>
++                        <property name="top_attach">1</property>
++                        <property name="bottom_attach">2</property>
++                        <property name="left_attach">1</property>
++                        <property name="right_attach">2</property>
++                        <property name="y_options"/>
++                      </packing>
++                    </child>
++                  </object>
++                </child>
++              </object>
++              <packing>
++                <property name="position">1</property>
++              </packing>
++            </child>
++          </object>
++          <packing>
++            <property name="expand">False</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkVBox" id="vbox11">
++            <property name="visible">True</property>
++            <property name="spacing">6</property>
++            <child>
++              <object class="GtkLabel" id="label25">
++                <property name="visible">True</property>
++                <property name="xalign">0</property>
++                <property name="label" translatable="yes">&lt;b&gt;Optional&lt;/b&gt;</property>
++                <property name="use_markup">True</property>
++              </object>
++              <packing>
++                <property name="expand">False</property>
++                <property name="fill">False</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkAlignment" id="alignment9">
++                <property name="visible">True</property>
++                <property name="left_padding">12</property>
++                <child>
++                  <object class="GtkTable" id="table3">
++                    <property name="visible">True</property>
++                    <property name="n_rows">5</property>
++                    <property name="n_columns">2</property>
++                    <property name="column_spacing">6</property>
++                    <property name="row_spacing">6</property>
++                    <child>
++                      <placeholder/>
++                    </child>
++                    <child>
++                      <object class="GtkCheckButton" id="disable_dpd_checkbutton">
++                        <property name="visible">True</property>
++                        <property name="can_focus">True</property>
++                        <property name="label" translatable="yes">Disable Dead Peer Detection</property>
++                        <property name="draw_indicator">True</property>
++                      </object>
++                      <packing>
++                        <property name="left_attach">1</property>
++                        <property name="right_attach">2</property>
++                        <property name="top_attach">4</property>
++                        <property name="bottom_attach">5</property>
++                      </packing>
++                    </child>
++                    <child>
++                      <object class="GtkLabel" id="label2">
++                        <property name="visible">True</property>
++                        <property name="xalign">0</property>
++                        <property name="label" translatable="yes">NAT traversal:</property>
++                      </object>
++                      <packing>
++                        <property name="top_attach">3</property>
++                        <property name="bottom_attach">4</property>
++                      </packing>
++                    </child>
++                    <child>
++                      <object class="GtkComboBox" id="natt_combo">
++                        <property name="visible">True</property>
++                        <property name="model">model1</property>
++                        <child>
++                          <object class="GtkCellRendererText" id="renderer1"/>
++                          <attributes>
++                            <attribute name="text">0</attribute>
++                          </attributes>
++                        </child>
++                      </object>
++                      <packing>
++                        <property name="left_attach">1</property>
++                        <property name="right_attach">2</property>
++                        <property name="top_attach">3</property>
++                        <property name="bottom_attach">4</property>
++                      </packing>
++                    </child>
++                  </object>
++                </child>
++              </object>
++              <packing>
++                <property name="position">1</property>
++              </packing>
++            </child>
++          </object>
++          <packing>
++            <property name="expand">False</property>
++            <property name="fill">False</property>
++            <property name="position">1</property>
++          </packing>
++        </child>
++      </object>
++    </child>
++  </object>
++</interface>
+--- /dev/null
++++ ike-2.2.1+dfsg/source/nm-ikec/nm-ikec-service.conf
+@@ -0,0 +1,22 @@
++<!DOCTYPE busconfig PUBLIC
++ "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
++ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
++<busconfig>
++	<policy user="root">
++		<allow own="org.freedesktop.NetworkManager.ikec"/>
++		<allow send_destination="org.freedesktop.NetworkManager.ikec"/>
++	</policy>
++	<policy at_console="true">
++		<allow own="org.freedesktop.NetworkManager.ikec"/>
++		<allow send_destination="org.freedesktop.NetworkManager.ikec"/>
++	</policy>
++	<policy user="nm-ikec">
++		<allow own="org.freedesktop.NetworkManager.ikec"/>
++		<allow send_destination="org.freedesktop.NetworkManager.ikec"/>
++	</policy>
++	<policy context="default">
++		<deny own="org.freedesktop.NetworkManager.ikec"/>
++		<deny send_destination="org.freedesktop.NetworkManager.ikec"/>
++	</policy>
++</busconfig>
++
+--- /dev/null
++++ ike-2.2.1+dfsg/source/nm-ikec/nm-ikec-service.name
+@@ -0,0 +1,10 @@
++[VPN Connection]
++name=ikec
++service=org.freedesktop.NetworkManager.ikec
++program=/usr/bin/nm-ikec
++supports-multiple-connections=true
++
++[GNOME]
++auth-dialog=/usr/lib/NetworkManager/nm-ikec-auth-dialog
++properties=/usr/lib/x86_64-linux-gnu/NetworkManager/libnm-ikec-properties
++supports-external-ui-mode=true
+--- /dev/null
++++ ike-2.2.1+dfsg/source/nm-ikec/tmp_build
+@@ -0,0 +1,7 @@
++#! /bin/sh
++
++sudo cp nm-ikec /usr/lib/network-manager-ikec/nm-ikec-service.real
++sudo cp libnm-ikec-properties.so /usr/lib/NetworkManager/libnm-ikec-properties.so
++sudo cp nm-ikec-service.conf /etc/dbus-1/system.d/nm-ikec-service.conf
++sudo cp nm-ikec-service.name /etc/NetworkManager/VPN/nm-ikec-service.name
++sudo cp nm-ikec-auth-dialog /usr/lib/NetworkManager/nm-ikec-auth-dialog

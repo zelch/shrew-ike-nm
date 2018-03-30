@@ -1,0 +1,46 @@
+Description: Make the services work reliably.
+ ike (2.2.1+dfsg-4.JP.07+xenial) xenial; urgency=low
+ .
+   * Don't tell NetworkManager that we can handle multiple VPN connections, we
+     don't handle the DBUS side of that, and so it doesn't work reliably on
+     16.04.
+   * Set the dbus permissions way too permissively, allowing anyone to talk to
+     the VPN connection.  This isn't ideal, but it actually works.
+Author: Zephaniah E. Loss-Cutler-Hull <zhull@jetpay.com>
+
+---
+The information above should follow the Patch Tagging Guidelines, please
+checkout http://dep.debian.net/deps/dep3/ to learn about the format. Here
+are templates for supplementary fields that you might want to add:
+
+Origin: <vendor|upstream|other>, <url of original patch>
+Bug: <url in upstream bugtracker>
+Bug-Debian: https://bugs.debian.org/<bugnumber>
+Bug-Ubuntu: https://launchpad.net/bugs/<bugnumber>
+Forwarded: <no|not-needed|url proving that it has been forwarded>
+Reviewed-By: <name and email of someone who approved the patch>
+Last-Update: <YYYY-MM-DD>
+
+--- ike-2.2.1+dfsg.orig/source/nm-ikec/nm-ikec-service.conf
++++ ike-2.2.1+dfsg/source/nm-ikec/nm-ikec-service.conf
+@@ -15,8 +15,8 @@
+ 		<allow send_destination="org.freedesktop.NetworkManager.ikec"/>
+ 	</policy>
+ 	<policy context="default">
+-		<deny own="org.freedesktop.NetworkManager.ikec"/>
+-		<deny send_destination="org.freedesktop.NetworkManager.ikec"/>
++		<allow own="org.freedesktop.NetworkManager.ikec"/>
++		<allow send_destination="org.freedesktop.NetworkManager.ikec"/>
+ 	</policy>
+ </busconfig>
+ 
+--- ike-2.2.1+dfsg.orig/source/nm-ikec/nm-ikec-service.name
++++ ike-2.2.1+dfsg/source/nm-ikec/nm-ikec-service.name
+@@ -2,7 +2,6 @@
+ name=ikec
+ service=org.freedesktop.NetworkManager.ikec
+ program=/usr/bin/nm-ikec
+-supports-multiple-connections=true
+ 
+ [GNOME]
+ auth-dialog=/usr/lib/NetworkManager/nm-ikec-auth-dialog

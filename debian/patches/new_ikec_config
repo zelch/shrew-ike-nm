@@ -1,0 +1,693 @@
+Description: <short summary of the patch>
+ TODO: Put a short summary on the line above and replace this paragraph
+ with a longer explanation of this change. Complete the meta-information
+ with other relevant fields (see below for details). To make it easier, the
+ information below has been extracted from the changelog. Adjust it or drop
+ it.
+ .
+ ike (2.2.1+dfsg-4.JP.02) trusty; urgency=low
+ .
+   * Major work on the preferences dialogs.
+Author: Zephaniah E. Loss-Cutler-Hull <zhull@jetpay.com>
+
+---
+The information above should follow the Patch Tagging Guidelines, please
+checkout http://dep.debian.net/deps/dep3/ to learn about the format. Here
+are templates for supplementary fields that you might want to add:
+
+Origin: <vendor|upstream|other>, <url of original patch>
+Bug: <url in upstream bugtracker>
+Bug-Debian: https://bugs.debian.org/<bugnumber>
+Bug-Ubuntu: https://launchpad.net/bugs/<bugnumber>
+Forwarded: <no|not-needed|url proving that it has been forwarded>
+Reviewed-By: <name and email of someone who approved the patch>
+Last-Update: <YYYY-MM-DD>
+
+--- ike-2.2.1+dfsg.orig/source/nm-ikec/ikec.cpp
++++ ike-2.2.1+dfsg/source/nm-ikec/ikec.cpp
+@@ -1337,14 +1337,18 @@ long _IKEC_NM::func( void * )
+ 
+ 		server_cert_rety:
+ 
+-		bdata.set(text, strlen(text));
+-		bdata.base64_decode();
++		bdata.set(text, strlen(text) + 1);
++		if (bdata.base64_decode()) {
++			log( STATUS_FAIL, "base64 decode success.\n");
++		} else {
++			log( STATUS_FAIL, "base64 decode failure.\n");
++		}
+ 		msg.set_cfgstr( CFGSTR_CRED_RSA_RCRT, &bdata );
+ 		result = ikei.send_message( msg, &msgres );
+ 
+ 		if( ( result != IPCERR_OK ) || ( msgres == IKEI_RESULT_FAILED ) )
+ 		{
+-			log( STATUS_FAIL, "server cert config failed\n" );
++			log( STATUS_FAIL, "server cert config failed (%s) (%s)\n", text, bdata.text() );
+ 			goto config_failed;
+ 		}
+ 
+@@ -1352,7 +1356,7 @@ long _IKEC_NM::func( void * )
+ 		{
+ 			if( !get_filepass() )
+ 			{
+-				log( STATUS_FAIL, "server cert file requires password\n" );
++				log( STATUS_FAIL, "server cert file requires password (%s) (%s)\n", text, bdata.text() );
+ 				goto config_failed;
+ 			}
+ 
+--- ike-2.2.1+dfsg.orig/source/nm-ikec/nm-ikec-props.ui
++++ ike-2.2.1+dfsg/source/nm-ikec/nm-ikec-props.ui
+@@ -60,6 +60,72 @@
+       </row>
+     </data>
+   </object>
++  <object class="GtkListStore" id="phase1-cipher-list">
++    <columns>
++      <!-- column-name gchararray1 -->
++      <column type="gchararray"/>
++    </columns>
++    <data>
++      <row>
++        <col id="0">auto</col>
++      </row>
++      <row>
++        <col id="0">aes</col>
++      </row>
++      <row>
++        <col id="0">blowfish</col>
++      </row>
++      <row>
++        <col id="0">3des</col>
++      </row>
++      <row>
++        <col id="0">cast</col>
++      </row>
++      <row>
++        <col id="0">des</col>
++      </row>
++    </data>
++  </object>
++  <object class="GtkListStore" id="phase1-exchange-list">
++    <columns>
++      <!-- column-name gchararray1 -->
++      <column type="gchararray"/>
++    </columns>
++    <data>
++      <row>
++        <col id="0">main</col>
++      </row>
++      <row>
++        <col id="0">aggressive</col>
++      </row>
++    </data>
++  </object>
++  <object class="GtkListStore" id="phase1-hash-list">
++    <columns>
++      <!-- column-name gchararray1 -->
++      <column type="gchararray"/>
++    </columns>
++    <data>
++      <row>
++        <col id="0">auto</col>
++      </row>
++      <row>
++        <col id="0">md5</col>
++      </row>
++      <row>
++        <col id="0">sha1</col>
++      </row>
++      <row>
++        <col id="0">sha2-256</col>
++      </row>
++      <row>
++        <col id="0">sha2-384</col>
++      </row>
++      <row>
++        <col id="0">sha2-512</col>
++      </row>
++    </data>
++  </object>
+   <object class="GtkNotebook" id="ikec-vbox">
+     <property name="visible">True</property>
+     <property name="can_focus">True</property>
+@@ -437,6 +503,21 @@
+                     <property name="width">3</property>
+                   </packing>
+                 </child>
++                <child>
++                  <object class="GtkCheckButton" id="vendor-chkpt-enable">
++                    <property name="label" translatable="yes">Enable vendor CHECKPOINT</property>
++                    <property name="visible">True</property>
++                    <property name="can_focus">True</property>
++                    <property name="receives_default">False</property>
++                    <property name="xalign">0</property>
++                    <property name="draw_indicator">True</property>
++                  </object>
++                  <packing>
++                    <property name="left_attach">0</property>
++                    <property name="top_attach">10</property>
++                    <property name="width">3</property>
++                  </packing>
++                </child>
+               </object>
+             </child>
+           </object>
+@@ -470,186 +551,162 @@
+         <property name="can_focus">False</property>
+         <property name="orientation">vertical</property>
+         <child>
+-          <object class="GtkFrame" id="frame2">
++          <object class="GtkGrid" id="grid4">
+             <property name="visible">True</property>
+             <property name="can_focus">False</property>
+-            <property name="hexpand">True</property>
+-            <property name="vexpand">True</property>
+-            <property name="label_xalign">0</property>
+-            <property name="shadow_type">none</property>
+             <child>
+-              <object class="GtkAlignment" id="alignment3">
++              <object class="GtkLabel" id="label17">
+                 <property name="visible">True</property>
+                 <property name="can_focus">False</property>
+-                <property name="left_padding">12</property>
++                <property name="label" translatable="yes">Server Certificate Authority</property>
++              </object>
++              <packing>
++                <property name="left_attach">0</property>
++                <property name="top_attach">0</property>
++                <property name="width">2</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkScrolledWindow" id="scrolledwindow1">
++                <property name="width_request">600</property>
++                <property name="height_request">100</property>
++                <property name="visible">True</property>
++                <property name="can_focus">True</property>
++                <property name="hexpand">True</property>
++                <property name="vexpand">True</property>
++                <property name="shadow_type">in</property>
++                <property name="overlay_scrolling">False</property>
+                 <child>
+-                  <object class="GtkGrid" id="grid4">
++                  <object class="GtkTextView" id="auth-server-cert-data">
+                     <property name="visible">True</property>
+-                    <property name="can_focus">False</property>
+-                    <child>
+-                      <object class="GtkLabel" id="label17">
+-                        <property name="visible">True</property>
+-                        <property name="can_focus">False</property>
+-                        <property name="label" translatable="yes">Server Certificate Authority</property>
+-                      </object>
+-                      <packing>
+-                        <property name="left_attach">0</property>
+-                        <property name="top_attach">0</property>
+-                        <property name="width">2</property>
+-                      </packing>
+-                    </child>
+-                    <child>
+-                      <object class="GtkScrolledWindow" id="scrolledwindow1">
+-                        <property name="width_request">600</property>
+-                        <property name="height_request">100</property>
+-                        <property name="visible">True</property>
+-                        <property name="can_focus">True</property>
+-                        <property name="hexpand">True</property>
+-                        <property name="vexpand">True</property>
+-                        <property name="shadow_type">in</property>
+-                        <property name="overlay_scrolling">False</property>
+-                        <child>
+-                          <object class="GtkTextView" id="auth-server-cert-data">
+-                            <property name="visible">True</property>
+-                            <property name="can_focus">True</property>
+-                            <property name="wrap_mode">word-char</property>
+-                            <property name="monospace">True</property>
+-                          </object>
+-                        </child>
+-                      </object>
+-                      <packing>
+-                        <property name="left_attach">0</property>
+-                        <property name="top_attach">1</property>
+-                        <property name="width">3</property>
+-                        <property name="height">5</property>
+-                      </packing>
+-                    </child>
+-                    <child>
+-                      <object class="GtkFileChooserButton" id="auth-server-cert-name">
+-                        <property name="visible">True</property>
+-                        <property name="can_focus">False</property>
+-                        <property name="create_folders">False</property>
+-                        <property name="show_hidden">True</property>
+-                      </object>
+-                      <packing>
+-                        <property name="left_attach">2</property>
+-                        <property name="top_attach">0</property>
+-                      </packing>
+-                    </child>
+-                    <child>
+-                      <object class="GtkLabel" id="label18">
+-                        <property name="visible">True</property>
+-                        <property name="can_focus">False</property>
+-                        <property name="label" translatable="yes">Client Certificate</property>
+-                      </object>
+-                      <packing>
+-                        <property name="left_attach">0</property>
+-                        <property name="top_attach">6</property>
+-                        <property name="width">2</property>
+-                      </packing>
+-                    </child>
+-                    <child>
+-                      <object class="GtkFileChooserButton" id="auth-client-cert-name">
+-                        <property name="visible">True</property>
+-                        <property name="can_focus">False</property>
+-                        <property name="create_folders">False</property>
+-                        <property name="show_hidden">True</property>
+-                      </object>
+-                      <packing>
+-                        <property name="left_attach">2</property>
+-                        <property name="top_attach">6</property>
+-                      </packing>
+-                    </child>
+-                    <child>
+-                      <object class="GtkScrolledWindow" id="scrolledwindow2">
+-                        <property name="height_request">100</property>
+-                        <property name="visible">True</property>
+-                        <property name="can_focus">True</property>
+-                        <property name="hexpand">True</property>
+-                        <property name="vexpand">True</property>
+-                        <property name="shadow_type">in</property>
+-                        <child>
+-                          <object class="GtkTextView" id="auth-client-cert-data">
+-                            <property name="visible">True</property>
+-                            <property name="can_focus">True</property>
+-                            <property name="hexpand">True</property>
+-                            <property name="vexpand">True</property>
+-                            <property name="wrap_mode">word-char</property>
+-                            <property name="monospace">True</property>
+-                          </object>
+-                        </child>
+-                      </object>
+-                      <packing>
+-                        <property name="left_attach">0</property>
+-                        <property name="top_attach">7</property>
+-                        <property name="width">3</property>
+-                        <property name="height">5</property>
+-                      </packing>
+-                    </child>
+-                    <child>
+-                      <object class="GtkLabel" id="label19">
+-                        <property name="visible">True</property>
+-                        <property name="can_focus">False</property>
+-                        <property name="label" translatable="yes">Client Key</property>
+-                      </object>
+-                      <packing>
+-                        <property name="left_attach">0</property>
+-                        <property name="top_attach">12</property>
+-                        <property name="width">2</property>
+-                      </packing>
+-                    </child>
+-                    <child>
+-                      <object class="GtkFileChooserButton" id="auth-client-key-name">
+-                        <property name="visible">True</property>
+-                        <property name="can_focus">False</property>
+-                        <property name="create_folders">False</property>
+-                        <property name="show_hidden">True</property>
+-                      </object>
+-                      <packing>
+-                        <property name="left_attach">2</property>
+-                        <property name="top_attach">12</property>
+-                      </packing>
+-                    </child>
+-                    <child>
+-                      <object class="GtkScrolledWindow" id="scrolledwindow3">
+-                        <property name="height_request">100</property>
+-                        <property name="visible">True</property>
+-                        <property name="can_focus">True</property>
+-                        <property name="hexpand">True</property>
+-                        <property name="vexpand">True</property>
+-                        <property name="shadow_type">in</property>
+-                        <child>
+-                          <object class="GtkTextView" id="auth-client-key-data">
+-                            <property name="visible">True</property>
+-                            <property name="can_focus">True</property>
+-                            <property name="wrap_mode">word-char</property>
+-                            <property name="monospace">True</property>
+-                          </object>
+-                        </child>
+-                      </object>
+-                      <packing>
+-                        <property name="left_attach">0</property>
+-                        <property name="top_attach">13</property>
+-                        <property name="width">3</property>
+-                        <property name="height">5</property>
+-                      </packing>
+-                    </child>
++                    <property name="can_focus">True</property>
++                    <property name="wrap_mode">word-char</property>
++                    <property name="monospace">True</property>
+                   </object>
+                 </child>
+               </object>
++              <packing>
++                <property name="left_attach">0</property>
++                <property name="top_attach">1</property>
++                <property name="width">3</property>
++                <property name="height">5</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkFileChooserButton" id="auth-server-cert-name">
++                <property name="visible">True</property>
++                <property name="can_focus">False</property>
++                <property name="create_folders">False</property>
++                <property name="show_hidden">True</property>
++              </object>
++              <packing>
++                <property name="left_attach">2</property>
++                <property name="top_attach">0</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkLabel" id="label18">
++                <property name="visible">True</property>
++                <property name="can_focus">False</property>
++                <property name="label" translatable="yes">Client Certificate</property>
++              </object>
++              <packing>
++                <property name="left_attach">0</property>
++                <property name="top_attach">6</property>
++                <property name="width">2</property>
++              </packing>
+             </child>
+-            <child type="label">
+-              <object class="GtkLabel" id="label16">
++            <child>
++              <object class="GtkFileChooserButton" id="auth-client-cert-name">
+                 <property name="visible">True</property>
+                 <property name="can_focus">False</property>
+-                <property name="label" translatable="yes">Credentials</property>
++                <property name="create_folders">False</property>
++                <property name="show_hidden">True</property>
++              </object>
++              <packing>
++                <property name="left_attach">2</property>
++                <property name="top_attach">6</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkScrolledWindow" id="scrolledwindow2">
++                <property name="height_request">100</property>
++                <property name="visible">True</property>
++                <property name="can_focus">True</property>
++                <property name="hexpand">True</property>
++                <property name="vexpand">True</property>
++                <property name="shadow_type">in</property>
++                <child>
++                  <object class="GtkTextView" id="auth-client-cert-data">
++                    <property name="visible">True</property>
++                    <property name="can_focus">True</property>
++                    <property name="hexpand">True</property>
++                    <property name="vexpand">True</property>
++                    <property name="wrap_mode">word-char</property>
++                    <property name="monospace">True</property>
++                  </object>
++                </child>
+               </object>
++              <packing>
++                <property name="left_attach">0</property>
++                <property name="top_attach">7</property>
++                <property name="width">3</property>
++                <property name="height">5</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkLabel" id="label19">
++                <property name="visible">True</property>
++                <property name="can_focus">False</property>
++                <property name="label" translatable="yes">Client Key</property>
++              </object>
++              <packing>
++                <property name="left_attach">0</property>
++                <property name="top_attach">12</property>
++                <property name="width">2</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkFileChooserButton" id="auth-client-key-name">
++                <property name="visible">True</property>
++                <property name="can_focus">False</property>
++                <property name="create_folders">False</property>
++                <property name="show_hidden">True</property>
++              </object>
++              <packing>
++                <property name="left_attach">2</property>
++                <property name="top_attach">12</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkScrolledWindow" id="scrolledwindow3">
++                <property name="height_request">100</property>
++                <property name="visible">True</property>
++                <property name="can_focus">True</property>
++                <property name="hexpand">True</property>
++                <property name="vexpand">True</property>
++                <property name="shadow_type">in</property>
++                <child>
++                  <object class="GtkTextView" id="auth-client-key-data">
++                    <property name="visible">True</property>
++                    <property name="can_focus">True</property>
++                    <property name="wrap_mode">word-char</property>
++                    <property name="monospace">True</property>
++                  </object>
++                </child>
++              </object>
++              <packing>
++                <property name="left_attach">0</property>
++                <property name="top_attach">13</property>
++                <property name="width">3</property>
++                <property name="height">5</property>
++              </packing>
+             </child>
+           </object>
+           <packing>
+             <property name="expand">False</property>
+             <property name="fill">True</property>
+-            <property name="position">0</property>
++            <property name="position">1</property>
+           </packing>
+         </child>
+       </object>
+@@ -661,12 +718,212 @@
+       <object class="GtkLabel" id="label3">
+         <property name="visible">True</property>
+         <property name="can_focus">False</property>
+-        <property name="label" translatable="yes">Authentication</property>
++        <property name="label" translatable="yes">Certs / Keys</property>
+       </object>
+       <packing>
+         <property name="position">2</property>
+         <property name="tab_fill">False</property>
+       </packing>
+     </child>
++    <child>
++      <object class="GtkGrid" id="grid1">
++        <property name="visible">True</property>
++        <property name="can_focus">False</property>
++        <child>
++          <object class="GtkLabel" id="label21">
++            <property name="visible">True</property>
++            <property name="can_focus">False</property>
++            <property name="label" translatable="yes">Phase 1 Exchange</property>
++          </object>
++          <packing>
++            <property name="left_attach">0</property>
++            <property name="top_attach">0</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkLabel" id="label22">
++            <property name="visible">True</property>
++            <property name="can_focus">False</property>
++            <property name="label" translatable="yes">Phase 1 Cipher</property>
++          </object>
++          <packing>
++            <property name="left_attach">0</property>
++            <property name="top_attach">1</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkLabel" id="label26">
++            <property name="visible">True</property>
++            <property name="can_focus">False</property>
++            <property name="label" translatable="yes">Phase 1 Key Length</property>
++          </object>
++          <packing>
++            <property name="left_attach">0</property>
++            <property name="top_attach">2</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkLabel" id="label23">
++            <property name="visible">True</property>
++            <property name="can_focus">False</property>
++            <property name="label" translatable="yes">Phase 1 Hash</property>
++          </object>
++          <packing>
++            <property name="left_attach">0</property>
++            <property name="top_attach">3</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkLabel" id="label24">
++            <property name="visible">True</property>
++            <property name="can_focus">False</property>
++            <property name="label" translatable="yes">Phase 1 DH Group</property>
++          </object>
++          <packing>
++            <property name="left_attach">0</property>
++            <property name="top_attach">4</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkLabel" id="label25">
++            <property name="visible">True</property>
++            <property name="can_focus">False</property>
++            <property name="label" translatable="yes">Phase 1 Life
++(Seconds)</property>
++          </object>
++          <packing>
++            <property name="left_attach">0</property>
++            <property name="top_attach">5</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkLabel" id="label27">
++            <property name="visible">True</property>
++            <property name="can_focus">False</property>
++            <property name="label" translatable="yes">Phase 1 Life
++(Kiobytes)</property>
++          </object>
++          <packing>
++            <property name="left_attach">0</property>
++            <property name="top_attach">6</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkComboBox" id="phase1-exchange">
++            <property name="visible">True</property>
++            <property name="can_focus">False</property>
++            <property name="model">phase1-exchange-list</property>
++            <property name="has_entry">True</property>
++            <property name="entry_text_column">0</property>
++            <property name="id_column">0</property>
++            <child internal-child="entry">
++              <object class="GtkEntry" id="combobox-entry4">
++                <property name="can_focus">False</property>
++              </object>
++            </child>
++          </object>
++          <packing>
++            <property name="left_attach">1</property>
++            <property name="top_attach">0</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkComboBox" id="phase1-cipher">
++            <property name="visible">True</property>
++            <property name="can_focus">False</property>
++            <property name="model">phase1-cipher-list</property>
++            <property name="has_entry">True</property>
++            <property name="entry_text_column">0</property>
++            <property name="id_column">0</property>
++            <child internal-child="entry">
++              <object class="GtkEntry" id="combobox-entry5">
++                <property name="can_focus">False</property>
++              </object>
++            </child>
++          </object>
++          <packing>
++            <property name="left_attach">1</property>
++            <property name="top_attach">1</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkEntry" id="phase1-keylen">
++            <property name="visible">True</property>
++            <property name="can_focus">True</property>
++            <property name="input_purpose">digits</property>
++          </object>
++          <packing>
++            <property name="left_attach">1</property>
++            <property name="top_attach">2</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkComboBox" id="phase1-hash">
++            <property name="visible">True</property>
++            <property name="can_focus">False</property>
++            <property name="model">phase1-hash-list</property>
++            <property name="has_entry">True</property>
++            <property name="entry_text_column">0</property>
++            <property name="id_column">0</property>
++            <child internal-child="entry">
++              <object class="GtkEntry" id="combobox-entry6">
++                <property name="can_focus">False</property>
++              </object>
++            </child>
++          </object>
++          <packing>
++            <property name="left_attach">1</property>
++            <property name="top_attach">3</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkEntry" id="phase1-dhgroup">
++            <property name="visible">True</property>
++            <property name="can_focus">True</property>
++            <property name="input_purpose">digits</property>
++          </object>
++          <packing>
++            <property name="left_attach">1</property>
++            <property name="top_attach">4</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkEntry" id="phase1-life-secs">
++            <property name="visible">True</property>
++            <property name="can_focus">True</property>
++            <property name="input_purpose">digits</property>
++          </object>
++          <packing>
++            <property name="left_attach">1</property>
++            <property name="top_attach">5</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkEntry" id="phase1-life-kbytes">
++            <property name="visible">True</property>
++            <property name="can_focus">True</property>
++            <property name="input_purpose">digits</property>
++          </object>
++          <packing>
++            <property name="left_attach">1</property>
++            <property name="top_attach">6</property>
++          </packing>
++        </child>
++      </object>
++      <packing>
++        <property name="position">3</property>
++      </packing>
++    </child>
++    <child type="tab">
++      <object class="GtkLabel" id="label20">
++        <property name="visible">True</property>
++        <property name="can_focus">False</property>
++        <property name="label" translatable="yes">Phase 1</property>
++      </object>
++      <packing>
++        <property name="position">3</property>
++        <property name="tab_fill">False</property>
++      </packing>
++    </child>
+   </object>
+ </interface>

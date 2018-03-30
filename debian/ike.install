@@ -1,0 +1,4 @@
+etc/iked.conf
+usr/sbin/iked
+usr/bin/ikec
+usr/lib/*/ike/*.so*

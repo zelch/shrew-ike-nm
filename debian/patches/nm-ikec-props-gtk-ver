@@ -1,0 +1,36 @@
+Description: Specify requires gtk+ 3.10.
+ 16.04 can read it with a minimum of 3.10, but 14.04 can't with a minimum of
+ 3.12, so we're forcing it to be 3.10 even though we are using some 3.12
+ features.
+ .
+ It still works well enough on both sets of systems.
+ .
+ ike (2.2.1+dfsg-4.JP.06+xenial) xenial; urgency=low
+ .
+   * Fix the UI for Ubuntu 14.04 systems.
+Author: Zephaniah E. Loss-Cutler-Hull <zhull@jetpay.com>
+
+---
+The information above should follow the Patch Tagging Guidelines, please
+checkout http://dep.debian.net/deps/dep3/ to learn about the format. Here
+are templates for supplementary fields that you might want to add:
+
+Origin: <vendor|upstream|other>, <url of original patch>
+Bug: <url in upstream bugtracker>
+Bug-Debian: https://bugs.debian.org/<bugnumber>
+Bug-Ubuntu: https://launchpad.net/bugs/<bugnumber>
+Forwarded: <no|not-needed|url proving that it has been forwarded>
+Reviewed-By: <name and email of someone who approved the patch>
+Last-Update: <YYYY-MM-DD>
+
+--- ike-2.2.1+dfsg.orig/source/nm-ikec/nm-ikec-props.ui
++++ ike-2.2.1+dfsg/source/nm-ikec/nm-ikec-props.ui
+@@ -1,7 +1,7 @@
+ <?xml version="1.0" encoding="UTF-8"?>
+ <!-- Generated with glade 3.18.3 -->
+ <interface>
+-  <requires lib="gtk+" version="3.12"/>
++  <requires lib="gtk+" version="3.10"/>
+   <object class="GtkListStore" id="auto_config_list">
+     <columns>
+       <!-- column-name dIsplay -->
